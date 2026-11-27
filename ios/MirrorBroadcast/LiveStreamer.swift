@@ -404,12 +404,19 @@ final class AudioClock {
         var right: [Float] = []
         var primed = false
         var volume: Float = 1
+        // auto level: keeps the sound loud and even (e.g. when Mobile Legends
+        // voice chat puts the game in quieter "call mode")
+        var level: Float = 0              // smoothed loudness (RMS)
+        var gain: Float = 1
+        let targetRMS: Float
+        let maxGain: Float
+        init(targetRMS: Float, maxGain: Float) { self.targetRMS = targetRMS; self.maxGain = maxGain }
     }
-    private let game = Source()
-    private let mic = Source()
+    private let game = Source(targetRMS: 0.12, maxGain: 4)     // up to +12 dB
+    private let mic = Source(targetRMS: 0.10, maxGain: 3)
     private let lock = NSLock()
-    private let target = 4_800        // 100 ms buffer before playing
-    private let maxKeep = 14_400      // never more than 300 ms behind
+    private let target = 9_600        // 200 ms buffer before playing (bursts of up to ~240 ms seen)
+    private let maxKeep = 33_600      // never more than 700 ms behind
 
     func setVolumes(game g: Double, mic m: Double) {
         lock.lock(); game.volume = Float(g); mic.volume = Float(m); lock.unlock()
@@ -453,6 +460,13 @@ final class AudioClock {
         lock.unlock()
     }
 
+    @inline(__always) private static func soft(_ x: Float) -> Float {
+        let a = abs(x)
+        if a <= 0.85 { return x }
+        let y = 0.85 + 0.15 * tanh((a - 0.85) / 0.15)
+        return x < 0 ? -y : y
+    }
+
     /// Next `frames` of mixed audio (always returns a buffer).
     func pull(_ frames: AVAudioFrameCount) -> AVAudioPCMBuffer? {
         guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames), let ch = out.floatChannelData else { return nil }
@@ -464,7 +478,23 @@ final class AudioClock {
             if !src.primed && src.left.count >= target { src.primed = true }
             guard src.primed else { continue }
             let take = min(n, src.left.count)
-            let v = src.volume
+            // loudness of this piece -> slowly adjust the gain
+            var sum: Float = 0, peak: Float = 0
+            for i in 0..<take {
+                let a = abs(src.left[i]), b = abs(src.right[i])
+                sum += a * a + b * b
+                peak = max(peak, max(a, b))
+            }
+            if take > 0 {
+                let rms = (sum / Float(take * 2)).squareRoot()
+                src.level = src.level * 0.9 + rms * 0.1
+                if src.level > 0.004 {                             // not silence: level it
+                    let want = min(max(src.targetRMS / src.level, 1), src.maxGain)
+                    src.gain += (want - src.gain) * (want < src.gain ? 0.3 : 0.03)   // fast down, slow up
+                }
+                if peak * src.gain > 0.95 { src.gain = max(1, 0.95 / max(peak, 0.0001)) }   // never clip
+            }
+            let v = src.volume * src.gain
             for i in 0..<take {
                 ch[0][i] += src.left[i] * v
                 ch[1][i] += src.right[i] * v
@@ -473,9 +503,9 @@ final class AudioClock {
             if src.left.isEmpty && take < n { src.primed = false }   // ran dry: build the buffer up again
         }
         lock.unlock()
-        for i in 0..<n {                                  // simple limiter: no harsh clipping
-            ch[0][i] = max(-1, min(1, ch[0][i]))
-            ch[1][i] = max(-1, min(1, ch[1][i]))
+        for i in 0..<n {                                  // soft limiter: game + voice together never crackle
+            ch[0][i] = Self.soft(ch[0][i])
+            ch[1][i] = Self.soft(ch[1][i])
         }
         return out
     }
@@ -501,6 +531,8 @@ final class LiveStreamer: @unchecked Sendable {
     }
     private var feed: AsyncStream<Item>.Continuation?
     private var feedTask: Task<Void, Never>?
+    private var audioFeed: AsyncStream<Item>.Continuation?
+    private var audioTask: Task<Void, Never>?
 
     private let lock = NSLock()
     private var status = LiveStatus()
@@ -544,18 +576,27 @@ final class LiveStreamer: @unchecked Sendable {
         statusServer.onTick = { [weak self] in self?.tick() }
         statusServer.start()
 
-        var cont: AsyncStream<Item>.Continuation?
-        let stream = AsyncStream<Item>(bufferingPolicy: .bufferingNewest(120)) { cont = $0 }
-        feed = cont
+        // two queues: video may skip an old frame when busy; audio NEVER drops
+        // (dropped audio pieces = the "cut by cut" sound)
+        var vcont: AsyncStream<Item>.Continuation?
+        let vstream = AsyncStream<Item>(bufferingPolicy: .bufferingNewest(10)) { vcont = $0 }
+        var acont: AsyncStream<Item>.Continuation?
+        let astream = AsyncStream<Item>(bufferingPolicy: .unbounded) { acont = $0 }
+        feed = vcont
+        audioFeed = acont
         let mixer = self.mixer
-        feedTask = Task {
-            for await item in stream {
-                switch item {
-                case .sample(let sb, let track): await mixer.append(sb, track: track)
-                case .pcm(let buf, let when, let track): await mixer.append(buf, when: when, track: track)
+        func pump(_ s: AsyncStream<Item>) -> Task<Void, Never> {
+            Task {
+                for await item in s {
+                    switch item {
+                    case .sample(let sb, let track): await mixer.append(sb, track: track)
+                    case .pcm(let buf, let when, let track): await mixer.append(buf, when: when, track: track)
+                    }
                 }
             }
         }
+        feedTask = pump(vstream)
+        audioTask = pump(astream)
 
         startIdleTimer()
         startSilentClock()
@@ -567,6 +608,7 @@ final class LiveStreamer: @unchecked Sendable {
         idleTimer?.cancel(); idleTimer = nil
         silentTimer?.cancel(); silentTimer = nil
         feed?.finish()
+        audioFeed?.finish()
         setState("ended")
         let session = self.session, mixer = self.mixer
         Task {
@@ -762,7 +804,7 @@ final class LiveStreamer: @unchecked Sendable {
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "live.silence", qos: .userInteractive))
         t.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(2))
         t.setEventHandler { [weak self] in
-            guard let self = self, let feed = self.feed, !self.isStopped else { return }
+            guard let self = self, let feed = self.audioFeed, !self.isStopped else { return }
             let due = Int64((AVAudioTime.seconds(forHostTime: mach_absolute_time()) - startSec) * 48_000)
             var guardCount = 0
             while sent + Int64(chunk) <= due && guardCount < 8 {

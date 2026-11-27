@@ -158,6 +158,15 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Limit: iOS does not let any app draw over other apps, so comments show when you switch back to USB Mirror (swipe the home bar), not on top of the game.
 - Real-phone test pending: install the new .ipa with Sideloadly, check USB/Wi-Fi still work, then Go Live to Facebook with privacy "Only me".
 
+## Phase 14 - Install anywhere + Studio + TikTok-style comments (2026-11-28)
+- **Portable package**: `1 - SETUP (first time).bat` removes the Google Drive "downloaded from internet" mark (Unblock-File) and runs `setup_check.py`: Windows 10/11 64-bit, folder (not inside zip / sync folder), all libraries load, GPU decoder, Apple Devices (Store page), Sideloadly, VB-Cable (admin install), Desktop shortcut with the app icon. `2 - Start Mirror.bat`. `START HERE (guide).html` = illustrated guide (download, PC setup, iPhone Sideloadly + Trust + Developer Mode, Android USB debugging, OBS, Go Live, problems).
+- Tested like a new PC: zip marked as internet download (ZoneId=3), Explorer extract (12,746 files marked) -> SETUP -> 0 marked, all OK with no Python on PATH -> mirror starts and finds the audio devices.
+- **Logo**: one icon (phone + waves, blue->red) for the iPhone app (AppIcon 1024), the PC window and the Desktop shortcut (`tools\make_icon.py`).
+- **Studio** (Go Live -> Studio): live preview of what viewers see; Landscape/Portrait; Fit + blur / Fit / Fill; logo from Photos (corner, size); banner text (4 colors); LIVE badge with timer; custom "Be right back" text. The extension draws it on the GPU (Core Image compositor) and re-reads the settings every second, so changes show on a running live.
+- **Comments like TikTok**: draggable arrow handle (snaps to left/right edge), tap -> see-through floating comments (no box, text shadow, old ones fade), drag the feed anywhere, see-through 40-100%, tap anywhere else -> hide. Comments are read from the chat page (YouTube live chat, TikTok LIVE web, Facebook comments). "Full chat" sheet to sign in / reply. "Float over game" = Picture-in-Picture window over the game (iOS only allows PiP over other apps; swipe it to the edge -> arrow tab). Beta: needs a real-phone test (background reading of comments).
+- CI 46075059871 OK -> build\iPhoneUSBMirror.ipa; portable zip rebuilt (266 MB).
+- Latency (Wi-Fi mirror log): decode 2-6 ms, sound within +-10 ms of video; the delay spikes (up to ~240 ms) come from the Wi-Fi link (signal 53 %, Realtek "Leisure Power Save" = Auto). USB has none.
+
 ## Next
 - Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
 - Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.

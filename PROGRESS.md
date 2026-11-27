@@ -104,6 +104,12 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Now: **WASAPI** output (22 ms) + **adaptive** buffer (starts 40 ms, +10 ms per dropout up to 120, shrinks after 30 s clean) + smooth ±1.25 % speed drift correction instead of jumps. Real iPhone: settles ~60 ms → laptop part ≈ **80 ms**.
 - The rest is ReplayKit on the iPhone (it delivers app audio in chunks after it plays); cannot be zero. Phone speaker + laptop together will always echo slightly → turn the iPhone volume down while streaming.
 
+## Audio latency measurements (2026-11-28, new iPhone build run 46043497534)
+- Added sound-only USB channel (iPhone port 2346) + SyncMeter (`[sync]` log lines) + iPhone-side audio delivery stats in INFO.
+- ReplayKit hands the extension **23.2 ms pieces, 43/s, with gaps up to ~45 ms** (measured INSIDE the iPhone) → this unevenness is iOS's, not USB/our code.
+- A/B test (same session, alternating): separate channel vs main channel → identical (jitter 28–45 ms, sound≈video arrival). Channel kept (harmless, protects against big keyframes). `MIRROR_AUDIO_CHANNEL=0` disables it for tests.
+- Laptop part now: WASAPI shared 22 ms (driver floor; exclusive mode would hide sound from OBS/TikTok Desktop Audio → not used) + adaptive buffer ~30–40 ms ≈ **55–60 ms** (was ~200 ms). Remaining delay vs phone speaker is ReplayKit's own.
+
 ## Next
 - Phase 8b: OBS / TikTok LIVE Studio capture guide, 30-min stability test.
 - Phase 9: docs.

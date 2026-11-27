@@ -13,6 +13,7 @@ Protocol: see docs/PROTOCOL.md
 
 import asyncio
 import collections
+import os
 import re
 import socket
 import struct
@@ -345,6 +346,9 @@ class AudioChannel(threading.Thread):
         self.s = receiver.s
 
     def run(self):
+        if os.environ.get("MIRROR_AUDIO_CHANNEL", "1") == "0":   # test switch: sound on main channel
+            print("[audio] sound-only channel disabled (MIRROR_AUDIO_CHANNEL=0)", flush=True)
+            return
         while self.s.running:
             if self.s.state != ST_CONNECTED:
                 time.sleep(0.3)

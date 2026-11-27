@@ -439,6 +439,7 @@ class WiFiFinder(threading.Thread):
         super().__init__(daemon=True, name="wifi-finder")
         self.s = shared
         self.found = []
+        self.iphones = []                   # Apple devices seen on Wi-Fi (lockdown port 62078)
         self.scan_now = threading.Event()
 
     @staticmethod
@@ -473,8 +474,8 @@ class WiFiFinder(threading.Thread):
                 out.append(h)
         return out[:6]
 
-    def scan(self):
-        """Non-blocking connect to x.x.x.1-254:2345 on each local /24 (~1 s)."""
+    def scan(self, port=DEVICE_PORT):
+        """Non-blocking connect to x.x.x.1-254:<port> on each local /24 (~1 s)."""
         mine = self.local_ipv4s()
         nets = sorted({ip.rsplit(".", 1)[0] for ip in mine})[:4]
         hits = []
@@ -487,7 +488,7 @@ class WiFiFinder(threading.Thread):
                 so = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 so.setblocking(False)
                 try:
-                    so.connect_ex((ip, DEVICE_PORT))
+                    so.connect_ex((ip, port))
                     socks[so] = ip
                 except OSError:
                     so.close()
@@ -509,6 +510,8 @@ class WiFiFinder(threading.Thread):
             if self.s.wifi_allowed and self.s.state != ST_CONNECTED:
                 try:
                     hits = self.scan()
+                    # every iPhone on Wi-Fi answers on 62078 - tells "phone is there, broadcast is not"
+                    self.iphones = [] if hits else self.scan(62078)
                 except Exception as e:
                     print(f"[wifi] scan failed: {e}", flush=True)
                     hits = []
@@ -610,7 +613,9 @@ class Receiver(threading.Thread):
             if sock is None:
                 if iphone_on_usb:
                     self.s.found = "iphone"
-                elif self.s.found == "iphone":
+                elif self.s.wifi_allowed and self.wifi.iphones and self.s.found in ("", "iphone", "iphone_wifi"):
+                    self.s.found, self.s.hint = "iphone_wifi", ", ".join(self.wifi.iphones[:2])
+                elif self.s.found in ("iphone", "iphone_wifi"):
                     self.s.found = ""
                 self.s.state = ST_NO_APP if self.s.found else ST_NO_USB
                 time.sleep(1.0)

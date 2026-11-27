@@ -662,6 +662,7 @@ class App:
             return "Connected - waiting for picture", ACCENT
         if st == ST_NO_APP:
             return {"iphone": ("iPhone found - start the broadcast", ACCENT),
+                    "iphone_wifi": (f"iPhone seen on Wi-Fi ({self.s.hint}) - broadcast not answering", AMBER),
                     "android_unauth": ("Android found - tap Allow on the phone", AMBER),
                     "android_error": ("Android found - could not start", RED)}.get(
                         self.s.found, ("Phone found", ACCENT))
@@ -946,7 +947,8 @@ class App:
              st == ST_CONNECTED),
             ("Open your game - the picture appears here", False),
         ]
-        title = {"iphone": "Start the broadcast", "android_unauth": "Tap Allow on the Android phone",
+        title = {"iphone": "Start the broadcast", "iphone_wifi": "iPhone is on Wi-Fi - start the broadcast",
+                 "android_unauth": "Tap Allow on the Android phone",
                  "android_error": "Android phone found - could not start"}.get(found, "Connect your phone")
         if st == ST_CONNECTED:
             title = "Almost there..."
@@ -978,6 +980,9 @@ class App:
         tip = "Tip: keep AssistiveTouch ON for a sharp game picture (Settings › Accessibility › Touch)"
         if found == "android_error" and self.s.hint:
             tip = "Problem: " + self.s.hint
+        elif found == "iphone_wifi":
+            tip = ("Not answering? Install the NEW USB Mirror app (Sideloadly), allow Local Network, "
+                   "then Start Broadcast")
         elif found == "android_unauth":
             tip = "On the phone: tick 'Always allow from this computer' \u2192 Allow"
         elif not found and st == ST_NO_USB and self.s.wifi_allowed:

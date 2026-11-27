@@ -32,7 +32,8 @@ final class MirrorServer {
     private var _wifi = false            // current client came over Wi-Fi (not USB)
 
     /// Video is skipped when more than this is still waiting to be sent.
-    private let videoBacklogLimit = 1_000_000   // ~0.3 s at 30 Mbps; a big keyframe fits
+    private let videoBacklogLimit = 1_000_000   // USB: ~0.3 s at 30 Mbps; a big keyframe fits
+    private let wifiBacklogLimit = 300_000      // Wi-Fi: drop frames early instead of building delay
     /// Audio (tiny) is only dropped when things are badly stuck.
     private let audioBacklogLimit = 2_000_000
 
@@ -54,7 +55,7 @@ final class MirrorServer {
     /// True when a client is connected and the send backlog is small.
     var canSendVideo: Bool {
         lock.lock(); defer { lock.unlock() }
-        return _connected && _pendingBytes < videoBacklogLimit
+        return _connected && _pendingBytes < (_wifi ? wifiBacklogLimit : videoBacklogLimit)
     }
 
     // MARK: start / stop

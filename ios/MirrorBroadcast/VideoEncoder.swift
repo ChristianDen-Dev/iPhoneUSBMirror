@@ -124,19 +124,18 @@ final class VideoEncoder {
 
     func matches(width w: Int, height h: Int) -> Bool { w == sourceWidth && h == sourceHeight }
 
-    /// Switch between the USB and Wi-Fi bitrate (safe while encoding).
-    func setWiFi(_ wifi: Bool) {
+    /// Change the bitrate while encoding (USB 20 Mbps; Wi-Fi adapts 12 -> 3 Mbps).
+    func setBitrate(_ avg: Int) {
         lock.lock(); defer { lock.unlock() }
-        guard let s = session, wifi != isWiFi else { return }
-        isWiFi = wifi
-        let avg = wifi ? Self.wifiBitrate : Self.bitrate
-        let peak = wifi ? Self.wifiPeakBytesPerSecond : Self.peakBytesPerSecond
+        guard let s = session, avg != currentBitrate else { return }
+        currentBitrate = avg
+        let peak = avg == Self.bitrate ? Self.peakBytesPerSecond : avg * 3 / 16   // ~1.5x average
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: avg))
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits,
                              value: [NSNumber(value: peak), NSNumber(value: 1)] as CFArray)
-        NSLog("[Mirror] bitrate -> \(avg / 1_000_000) Mbps (\(wifi ? "Wi-Fi" : "USB"))")
+        NSLog("[Mirror] bitrate -> \(avg / 1_000_000) Mbps")
     }
-    private var isWiFi = false
+    private(set) var currentBitrate = VideoEncoder.bitrate
 
     func requestKeyframe() {
         lock.lock(); forceKeyframe = true; lock.unlock()

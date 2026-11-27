@@ -27,6 +27,17 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var encoderDescription = "none"
     private var tickCount = 0
 
+    // Wi-Fi: adaptive bitrate. Frames dropped because the network is behind
+    // -> step down; several clean seconds -> step up again.
+    private static let wifiLevels = [12_000_000, 8_000_000, 5_000_000, 3_000_000]
+    private var wifiLevel = 0
+    private var cleanSeconds = 0
+    private var droppedFrames = 0          // this second (guarded by stateLock)
+    private var droppedTotal = 0
+    private var targetBitrate: Int {
+        server.isWiFiClient ? Self.wifiLevels[wifiLevel] : VideoEncoder.bitrate
+    }
+
     // audio delivery diagnostics (how evenly ReplayKit hands us sound)
     private let audioStatsLock = NSLock()
     private var lastAudioArrival: CFTimeInterval = 0
@@ -38,12 +49,15 @@ class SampleHandler: RPBroadcastSampleHandler {
         server.onClientConnected = { [weak self] in
             guard let self = self else { return }
             self.stateLock.lock(); self.orientationDirty = true; self.stateLock.unlock()
-            self.encoder?.setWiFi(self.server.isWiFiClient)
+            self.wifiLevel = 1                      // start Wi-Fi at 8 Mbps, climb if clean
+            self.cleanSeconds = 0
+            self.encoder?.setBitrate(self.targetBitrate)
             self.encoder?.requestKeyframe()
         }
         server.onTick = { [weak self] in
             guard let self = self, self.server.isClientConnected else { return }
             self.encoder?.repeatLastFrameIfIdle()
+            self.adaptBitrate()
             self.tickCount += 1
             if self.tickCount % 5 == 1 { self.sendInfo() }   // every ~5 s
         }
@@ -93,7 +107,7 @@ class SampleHandler: RPBroadcastSampleHandler {
             encoder?.invalidate()
             encoder = VideoEncoder(sourceWidth: w, sourceHeight: h)
             encoder?.onPacket = { [weak self] packet in self?.server.send(packet, isVideo: true) }
-            encoder?.setWiFi(server.isWiFiClient)
+            encoder?.setBitrate(targetBitrate)
             stateLock.lock()
             sourceDescription = "\(w)x\(h) \(fourCC(CVPixelBufferGetPixelFormatType(pixelBuffer)))"
             encoderDescription = encoder.map { "\($0.width)x\($0.height)" } ?? "FAILED"
@@ -103,7 +117,11 @@ class SampleHandler: RPBroadcastSampleHandler {
         guard let enc = encoder else { return }
 
         // Busy encoder or slow socket -> DROP this frame (never queue).
-        guard enc.isReady, server.canSendVideo else { return }
+        guard enc.isReady else { return }
+        guard server.canSendVideo else {
+            stateLock.lock(); droppedFrames += 1; droppedTotal += 1; stateLock.unlock()
+            return
+        }
         enc.encode(pixelBuffer, pts: pts)
     }
 
@@ -118,6 +136,20 @@ class SampleHandler: RPBroadcastSampleHandler {
             return
         }
         server.send(Packet.make(.orientation, timestampUs: microseconds(pts), payload: Data([value])), isVideo: false)
+    }
+
+    /// Once per second (network queue).
+    private func adaptBitrate() {
+        stateLock.lock(); let dropped = droppedFrames; droppedFrames = 0; stateLock.unlock()
+        guard server.isWiFiClient else { return }
+        if dropped >= 3 {
+            cleanSeconds = 0
+            if wifiLevel < Self.wifiLevels.count - 1 { wifiLevel += 1 }
+        } else {
+            cleanSeconds += 1
+            if cleanSeconds >= 6 && wifiLevel > 0 { wifiLevel -= 1; cleanSeconds = 0 }
+        }
+        encoder?.setBitrate(targetBitrate)
     }
 
     // MARK: diagnostics
@@ -139,12 +171,20 @@ class SampleHandler: RPBroadcastSampleHandler {
         audioPieces = 0; audioMaxGapMs = 0; micPieces = 0
         audioStatsLock.unlock()
         let text = String(format: "source %@ -> encode %@ | orient %d | mem %.1f MB | thermal %@ | lowPower %@"
-                          + " | audio in %d pieces, max gap %.0f ms, channel %@ | mic %@ | link %@",
+                          + " | audio in %d pieces, max gap %.0f ms, channel %@ | mic %@ | link %@"
+                          + " | bitrate %d Mbps, dropped %d",
                           src, enc, Int(orient), memoryFootprintMB(), thermal,
                           ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off",
                           pieces, maxGap, audioServer.isClientConnected ? "separate" : "main",
-                          mics > 0 ? "on" : "off", server.isWiFiClient ? "wifi" : "usb")
+                          mics > 0 ? "on" : "off", server.isWiFiClient ? "wifi" : "usb",
+                          (encoder?.currentBitrate ?? 0) / 1_000_000, droppedTotalSnapshot())
         server.send(Packet.make(.info, timestampUs: 0, payload: Data(text.utf8)), isVideo: false)
+    }
+
+    private func droppedTotalSnapshot() -> Int {
+        stateLock.lock(); defer { stateLock.unlock() }
+        let n = droppedTotal; droppedTotal = 0
+        return n
     }
 
     // MARK: audio

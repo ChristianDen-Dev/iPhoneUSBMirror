@@ -36,6 +36,8 @@ targets:
         CFBundleDevelopmentRegion: en
         CFBundleDisplayName: USB Mirror
         NSMicrophoneUsageDescription: Sends your voice to your stream when you turn on Microphone in the Start Broadcast sheet.
+        NSLocalNetworkUsageDescription: Lets the Windows receiver show your screen over Wi-Fi (no cable).
+        NSBonjourServices: [_usbmirror._tcp]
         CFBundleExecutable: $(EXECUTABLE_NAME)
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleInfoDictionaryVersion: "6.0"
@@ -71,6 +73,7 @@ targets:
         CFBundleDevelopmentRegion: en
         CFBundleDisplayName: iPhone USB Mirror   # name shown in the broadcast list
         NSMicrophoneUsageDescription: Sends your voice to your stream when you turn on Microphone in the Start Broadcast sheet.
+        NSLocalNetworkUsageDescription: Lets the Windows receiver show your screen over Wi-Fi (no cable).
         CFBundleExecutable: $(EXECUTABLE_NAME)
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleInfoDictionaryVersion: "6.0"

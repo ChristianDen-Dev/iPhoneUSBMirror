@@ -1,7 +1,8 @@
 // TCP server on the iPhone (PeerTalk-style). The Windows receiver reaches it
-// through usbmux over the USB cable; usbmuxd on the phone connects to
-// 127.0.0.1:<port>, so we listen on loopback only (no Wi-Fi exposure,
-// no Local Network permission prompt).
+//   - over USB: usbmux on the phone connects to 127.0.0.1:<port>
+//   - over Wi-Fi: the laptop connects to <iPhone Wi-Fi IP>:<port>
+// We listen on all addresses so both work (Wi-Fi needs the Local Network
+// permission, which the host app asks for).
 //
 // - One client at a time. A new client replaces the old one (makes
 //   reconnects after an unplug instant).
@@ -23,12 +24,12 @@ final class MirrorServer {
     private var connection: NWConnection?
     private var timer: DispatchSourceTimer?
     private var stopped = true
-    private var bindLoopbackOnly = true
 
     // Shared with other threads -> guarded by lock.
     private let lock = NSLock()
     private var _connected = false
     private var _pendingBytes = 0
+    private var _wifi = false            // current client came over Wi-Fi (not USB)
 
     /// Video is skipped when more than this is still waiting to be sent.
     private let videoBacklogLimit = 1_000_000   // ~0.3 s at 30 Mbps; a big keyframe fits
@@ -42,6 +43,12 @@ final class MirrorServer {
     var isClientConnected: Bool {
         lock.lock(); defer { lock.unlock() }
         return _connected
+    }
+
+    /// True when the current client is on Wi-Fi (USB clients come from 127.0.0.1).
+    var isWiFiClient: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _wifi
     }
 
     /// True when a client is connected and the send backlog is small.
@@ -78,24 +85,16 @@ final class MirrorServer {
         params.allowLocalEndpointReuse = true
 
         do {
-            let l: NWListener
-            if bindLoopbackOnly {
-                params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
-                l = try NWListener(using: params)
-            } else {
-                l = try NWListener(using: params, on: port)
-            }
+            let l = try NWListener(using: params, on: port)   // all addresses: USB + Wi-Fi
             l.stateUpdateHandler = { [weak self] state in
                 guard let self = self else { return }
                 switch state {
                 case .ready:
-                    NSLog("[Mirror] listening on port \(self.port) (loopbackOnly=\(self.bindLoopbackOnly))")
+                    NSLog("[Mirror] listening on port \(self.port)")
                 case .failed(let err):
                     NSLog("[Mirror] listener failed: \(err)")
                     l.cancel()
                     if self.listener === l { self.listener = nil }
-                    // If loopback binding is refused, fall back to any address.
-                    self.bindLoopbackOnly.toggle()
                     self.queue.asyncAfter(deadline: .now() + 1) { self.startListener() }
                 default:
                     break
@@ -106,7 +105,6 @@ final class MirrorServer {
             listener = l
         } catch {
             NSLog("[Mirror] cannot create listener: \(error)")
-            bindLoopbackOnly.toggle()
             queue.asyncAfter(deadline: .now() + 1) { self.startListener() }
         }
     }
@@ -128,7 +126,8 @@ final class MirrorServer {
     private func accept(_ conn: NWConnection) {
         // Newest client wins.
         connection?.cancel()
-        lock.lock(); _pendingBytes = 0; lock.unlock()
+        let wifi = !Self.isLoopback(conn.endpoint)
+        lock.lock(); _pendingBytes = 0; _wifi = wifi; lock.unlock()
         connection = conn
 
         conn.stateUpdateHandler = { [weak self, weak conn] state in
@@ -152,6 +151,18 @@ final class MirrorServer {
         }
         conn.start(queue: queue)
         receiveLoop(conn)
+    }
+
+    /// USB clients (usbmux) always come from 127.0.0.1 / ::1.
+    private static func isLoopback(_ ep: NWEndpoint) -> Bool {
+        if case let .hostPort(host, _) = ep {
+            switch host {
+            case .ipv4(let a): return a == .loopback
+            case .ipv6(let a): return a == .loopback || "\(a)".hasSuffix("127.0.0.1")
+            default: return false
+            }
+        }
+        return false
     }
 
     /// We don't expect data from the receiver; reading just detects closes.

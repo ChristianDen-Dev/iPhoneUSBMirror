@@ -18,8 +18,10 @@ final class VideoEncoder {
     var onPacket: ((Data) -> Void)?
 
     static let maxLongSide = 1920
-    static let bitrate = 20_000_000           // bits per second (average)
-    static let peakBytesPerSecond = 3_750_000 // ~30 Mbps hard cap
+    static let bitrate = 20_000_000           // USB: bits per second (average)
+    static let peakBytesPerSecond = 3_750_000 // USB: ~30 Mbps hard cap
+    static let wifiBitrate = 12_000_000       // Wi-Fi: less air time = fewer stutters
+    static let wifiPeakBytesPerSecond = 2_250_000
     static let fps = 60
 
     let width: Int
@@ -121,6 +123,20 @@ final class VideoEncoder {
     }
 
     func matches(width w: Int, height h: Int) -> Bool { w == sourceWidth && h == sourceHeight }
+
+    /// Switch between the USB and Wi-Fi bitrate (safe while encoding).
+    func setWiFi(_ wifi: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard let s = session, wifi != isWiFi else { return }
+        isWiFi = wifi
+        let avg = wifi ? Self.wifiBitrate : Self.bitrate
+        let peak = wifi ? Self.wifiPeakBytesPerSecond : Self.peakBytesPerSecond
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: avg))
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits,
+                             value: [NSNumber(value: peak), NSNumber(value: 1)] as CFArray)
+        NSLog("[Mirror] bitrate -> \(avg / 1_000_000) Mbps (\(wifi ? "Wi-Fi" : "USB"))")
+    }
+    private var isWiFi = false
 
     func requestKeyframe() {
         lock.lock(); forceKeyframe = true; lock.unlock()

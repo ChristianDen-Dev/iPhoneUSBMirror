@@ -38,6 +38,7 @@ class SampleHandler: RPBroadcastSampleHandler {
         server.onClientConnected = { [weak self] in
             guard let self = self else { return }
             self.stateLock.lock(); self.orientationDirty = true; self.stateLock.unlock()
+            self.encoder?.setWiFi(self.server.isWiFiClient)
             self.encoder?.requestKeyframe()
         }
         server.onTick = { [weak self] in
@@ -92,6 +93,7 @@ class SampleHandler: RPBroadcastSampleHandler {
             encoder?.invalidate()
             encoder = VideoEncoder(sourceWidth: w, sourceHeight: h)
             encoder?.onPacket = { [weak self] packet in self?.server.send(packet, isVideo: true) }
+            encoder?.setWiFi(server.isWiFiClient)
             stateLock.lock()
             sourceDescription = "\(w)x\(h) \(fourCC(CVPixelBufferGetPixelFormatType(pixelBuffer)))"
             encoderDescription = encoder.map { "\($0.width)x\($0.height)" } ?? "FAILED"
@@ -137,11 +139,11 @@ class SampleHandler: RPBroadcastSampleHandler {
         audioPieces = 0; audioMaxGapMs = 0; micPieces = 0
         audioStatsLock.unlock()
         let text = String(format: "source %@ -> encode %@ | orient %d | mem %.1f MB | thermal %@ | lowPower %@"
-                          + " | audio in %d pieces, max gap %.0f ms, channel %@ | mic %@",
+                          + " | audio in %d pieces, max gap %.0f ms, channel %@ | mic %@ | link %@",
                           src, enc, Int(orient), memoryFootprintMB(), thermal,
                           ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off",
                           pieces, maxGap, audioServer.isClientConnected ? "separate" : "main",
-                          mics > 0 ? "on" : "off")
+                          mics > 0 ? "on" : "off", server.isWiFiClient ? "wifi" : "usb")
         server.send(Packet.make(.info, timestampUs: 0, payload: Data(text.utf8)), isVideo: false)
     }
 

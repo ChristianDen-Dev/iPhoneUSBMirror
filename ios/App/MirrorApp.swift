@@ -3,6 +3,7 @@
 
 import SwiftUI
 import ReplayKit
+import Network
 
 @main
 struct MirrorApp: App {
@@ -14,8 +15,10 @@ struct MirrorApp: App {
 }
 
 struct ContentView: View {
+    @StateObject private var net = WiFiInfo()
+
     var body: some View {
-        VStack(spacing: 28) {
+        VStack(spacing: 24) {
             Text("iPhone USB Mirror")
                 .font(.largeTitle.bold())
 
@@ -24,7 +27,7 @@ struct ContentView: View {
                 .background(Circle().fill(Color.red.opacity(0.15)))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("1. Plug the iPhone into the laptop (USB).")
+                Text("1. USB: plug the iPhone into the laptop. Wi-Fi: same Wi-Fi as the laptop (or the laptop on this iPhone's Hotspot).")
                 Text("2. Start the receiver on Windows.")
                 Text("3. Tap the button above → choose **iPhone USB Mirror** → **Start Broadcast**.")
                 Text("4. Open your game. To stop, tap the red status pill / Control Center.")
@@ -32,11 +35,63 @@ struct ContentView: View {
             .font(.body)
             .padding(.horizontal, 24)
 
-            Text("Mic is not captured — only game sound.")
+            VStack(spacing: 4) {
+                Text("Wi-Fi address of this iPhone").font(.footnote).foregroundColor(.secondary)
+                Text(net.addresses.isEmpty ? "not on Wi-Fi" : net.addresses.joined(separator: "   "))
+                    .font(.title3.monospacedDigit().bold())
+                Text("The receiver finds it by itself; type it only if it asks.")
+                    .font(.footnote).foregroundColor(.secondary)
+            }
+
+            Text("Mic: turn on Microphone in the broadcast sheet only if you want the iPhone mic.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
         }
         .padding()
+        .onAppear { net.start() }
+    }
+}
+
+/// Shows the iPhone's Wi-Fi / Hotspot IPv4 address and triggers the
+/// "Local Network" permission prompt once (needed for Wi-Fi mirroring:
+/// iOS only lets the broadcast accept Wi-Fi connections after this).
+final class WiFiInfo: ObservableObject {
+    @Published var addresses: [String] = []
+    private var listener: NWListener?
+    private var timer: Timer?
+
+    func start() {
+        refresh()
+        if timer == nil {
+            timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
+        }
+        // Advertising a Bonjour service makes iOS ask for Local Network access.
+        if listener == nil, let l = try? NWListener(using: .tcp) {
+            l.service = NWListener.Service(name: "iPhone USB Mirror", type: "_usbmirror._tcp")
+            l.newConnectionHandler = { $0.cancel() }
+            l.stateUpdateHandler = { _ in }
+            l.start(queue: .main)
+            listener = l
+        }
+    }
+
+    private func refresh() {
+        var found: [String] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return }
+        defer { freeifaddrs(ifaddr) }
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let ifa = ptr.pointee
+            guard let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let name = String(cString: ifa.ifa_name)
+            guard name == "en0" || name.hasPrefix("bridge") else { continue }   // Wi-Fi / Hotspot
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count),
+                           nil, 0, NI_NUMERICHOST) == 0 {
+                found.append(String(cString: host))
+            }
+        }
+        if found != addresses { addresses = found }
     }
 }
 

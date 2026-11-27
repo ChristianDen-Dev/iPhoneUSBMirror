@@ -182,6 +182,13 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Two mics: game and mic are independent inputs in AudioClock; either can stop or change format without muting the other. Teammates' voices are part of the game sound; your voice needs Microphone ON in the broadcast sheet.
 - CI 46080680910 OK -> build\DenDevLive.ipa; package rebuilt.
 
+## Phase 17 - Den-Dev Live mic: game volume stays normal (2026-11-28)
+- Problem: the Microphone switch in the Start Broadcast sheet records in iOS "call" mode, and iOS then turns all other sound (the game) down.
+- Fix: the app records your voice itself (`MicSender`, AVAudioSession playAndRecord, mode default = no voice processing, mixWithOthers + defaultToSpeaker), 48 kHz mono 16-bit, sent to the extension over 127.0.0.1:2398. The extension (`MicReceiver`) mixes it into AudioClock. Recording starts when a live starts and stops when it ends.
+- Go Live -> Sound: switch "Den-Dev Live mic (game stays loud)" (on by default). Keep Microphone OFF in the broadcast sheet. If the broadcast mic is ON too, the app mic is used and the sheet mic is ignored (no double voice); without app-mic data for 1 s, the sheet mic is used.
+- Limits: the Mobile Legends in-game mic is controlled by ML. When you talk in ML, ML itself switches to call mode (iOS may then lower the game a little); the auto level keeps the stream loud. With the phone speaker the app mic also hears the game: earphones give the cleanest sound.
+- CI 46081773991 -> build\DenDevLive.ipa.
+
 ## Next
 - Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
 - Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.

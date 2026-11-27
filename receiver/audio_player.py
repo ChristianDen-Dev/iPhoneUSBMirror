@@ -344,7 +344,14 @@ class AudioRouter:
         self.stream = AudioPlayer(STREAM_DEVICE, "stream")
         self.cable_name = (find_output(STREAM_DEVICE) or (None, ""))[1]
         self.stream_enabled = stream_enabled
-        self.mic_source = "laptop" # which mic goes into the stream: "laptop" / "phone" / "off"
+        self.mic_source = "auto"   # stream mic: "auto" / "laptop" / "phone" / "off"
+        # iPhone mic health (for Auto + diagnostics)
+        self.phone_heard = 0.0     # last time the iPhone mic had real sound (not digital silence)
+        self.phone_pieces = 0
+        self.phone_silent_pieces = 0
+        self.phone_peak = 0.0
+        self.laptop_peak = 0.0
+        self._auto_last = None
         self.mic_muted = False
         self.laptop_mic = LaptopMic(self._laptop_mic_pcm)
         self.mic_last = 0.0        # time the last mic piece arrived
@@ -375,21 +382,57 @@ class AudioRouter:
         """True while the iPhone sends its microphone."""
         return time.monotonic() - self.mic_last < 1.5
 
+    PHONE_SILENT = 8 / 32768       # below this the iPhone mic is muted by iOS (digital silence)
+    PHONE_GRACE_S = 0.8            # Auto: how long the iPhone mic may be silent before switching
+
+    @property
+    def phone_mic_ok(self):
+        """iPhone mic arrives AND has real sound (iOS gives exact silence when
+        another app - e.g. Mobile Legends voice chat - takes the mic)."""
+        return self.mic_active and time.monotonic() - self.phone_heard < self.PHONE_GRACE_S
+
+    @property
+    def effective_mic(self):
+        """The mic that goes into the stream right now: "phone", "laptop" or "off"."""
+        src = self.mic_source
+        if src == "auto":
+            src = "phone" if self.phone_mic_ok else "laptop"
+            if src != self._auto_last:
+                if self._auto_last is not None:
+                    why = "iPhone mic is back" if src == "phone" else "iPhone mic silent / off"
+                    print(f"[mic] {time.strftime('%H:%M:%S')} auto: now {src} mic ({why})", flush=True)
+                self._auto_last = src
+                self.stream.reset_mix()
+        return src
+
     @property
     def mic_ready(self):
         """The chosen mic is really delivering sound."""
-        if self.mic_source == "phone":
+        eff = self.effective_mic
+        if eff == "phone":
             return self.mic_active
-        if self.mic_source == "laptop":
+        if eff == "laptop":
             return self.laptop_mic.stream is not None
         return False
+
+    def mic_report(self):
+        """One line for the log, then reset the counters."""
+        n, sil = self.phone_pieces, self.phone_silent_pieces
+        db = lambda v: f"{20 * np.log10(v):.0f} dB" if v > 0 else "-inf"
+        text = (f"stream mic {self.mic_source}->{self.effective_mic}{' MUTED' if self.mic_muted else ''} | "
+                f"iPhone mic {n} pieces, silent {100 * sil / n if n else 0:.0f}%, peak {db(self.phone_peak)} | "
+                f"laptop mic peak {db(self.laptop_peak)} | game peak {db(self.level)}")
+        self.phone_pieces = self.phone_silent_pieces = 0
+        self.phone_peak = self.laptop_peak = 0.0
+        return text
 
     def set_mic_source(self, source):
         """ONE mic at a time: laptop/headset, iPhone, or off (= TikTok/OBS's own mic)."""
         self.mic_source = source
         self.stream.reset_mix()
         self.mic_level = 0.0
-        if source == "laptop" and self.cable_ok:
+        self._auto_last = None
+        if source in ("laptop", "auto") and self.cable_ok:
             self.laptop_mic.start()
         else:
             self.laptop_mic.stop()
@@ -406,13 +449,25 @@ class AudioRouter:
             self.stream.feed_mix(pcm)
 
     def _laptop_mic_pcm(self, pcm):
-        if self.mic_source == "laptop":
+        a = np.frombuffer(pcm, dtype=np.int16)
+        if a.size:
+            self.laptop_peak = max(self.laptop_peak, float(np.abs(a).max()) / 32768.0)
+        if self.effective_mic == "laptop":
             self._mic_in(pcm)
 
     def feed_mic(self, ts_us, pcm):
         """iPhone mic pieces (only arrive when its Microphone toggle is on)."""
-        self.mic_last = time.monotonic()
-        if self.mic_source == "phone":
+        now = time.monotonic()
+        self.mic_last = now
+        a = np.frombuffer(pcm, dtype=np.int16)
+        peak = float(np.abs(a).max()) / 32768.0 if a.size else 0.0
+        self.phone_pieces += 1
+        self.phone_peak = max(self.phone_peak, peak)
+        if peak > self.PHONE_SILENT:
+            self.phone_heard = now
+        else:
+            self.phone_silent_pieces += 1
+        if self.effective_mic == "phone":
             self._mic_in(pcm)
 
     def set_stream_enabled(self, on):
@@ -421,7 +476,7 @@ class AudioRouter:
             self.stream.close()
             self.stream.reset()
             self.laptop_mic.stop()
-        elif self.mic_source == "laptop":
+        elif self.mic_source in ("laptop", "auto"):
             self.laptop_mic.start()
 
     def reset(self):

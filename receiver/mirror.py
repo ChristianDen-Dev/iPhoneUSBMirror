@@ -50,7 +50,7 @@ DEFAULTS = {
     "show_stats": False,
     "volume": 100,                   # laptop volume 0-150 % (the stream always gets 100 %)
     "stream_output": True,           # send game sound to the VB-Audio cable for TikTok / OBS
-    "mic_source": "laptop",          # ONE mic into the stream: "laptop" / "phone" (iPhone) / "off"
+    "mic_source": "auto",            # ONE mic into the stream: "auto" (iPhone, else laptop) / "laptop" / "phone" / "off"
     "mic_gain": 100,                 # mic loudness in the stream, %
     "window_w": 1280,
     "window_h": 800,
@@ -65,7 +65,7 @@ HELP_ROWS = [
     ("M", "Laptop sound on/off (the stream keeps its sound via VB-Cable)"),
     ("Up / Down, wheel", "Laptop volume"),
     ("A", "Sound panel: where game sound and mic come from"),
-    ("V", "Switch the stream mic: Laptop \u2192 iPhone \u2192 Off (only one at a time)"),
+    ("V", "Stream mic: Auto \u2192 Laptop \u2192 iPhone \u2192 Off (only one at a time)"),
     ("N", "Mute / unmute the stream mic"),
     ("T", "Always on top"),
     ("R", "Flip landscape 180°"),
@@ -76,8 +76,8 @@ HELP_ROWS = [
 ]
 
 
-MIC_SOURCES = ("laptop", "phone", "off")
-MIC_LABEL = {"laptop": "Laptop mic", "phone": "iPhone mic", "off": "No mic (TikTok/OBS mic)"}
+MIC_SOURCES = ("auto", "laptop", "phone", "off")
+MIC_LABEL = {"auto": "Auto mic", "laptop": "Laptop mic", "phone": "iPhone mic", "off": "No mic (TikTok/OBS mic)"}
 
 
 def load_settings():
@@ -136,7 +136,7 @@ class App:
         self.router = s.audio = AudioRouter(self.cfg["stream_output"])
         self.audio = self.router.laptop          # what you hear on the laptop
         if self.cfg["mic_source"] not in MIC_SOURCES:
-            self.cfg["mic_source"] = "laptop"
+            self.cfg["mic_source"] = "auto"
         self.router.stream.mix_gain = self.cfg["mic_gain"] / 100
         self.router.set_mic_source(self.cfg["mic_source"])
         self.audio.set_volume(self.cfg["volume"] / 100)
@@ -329,7 +329,7 @@ class App:
                 name = MIC_LABEL[self.router.mic_source]
                 self.toast(f"{name} MUTED" if self.router.mic_muted else f"{name} on",
                            RED if self.router.mic_muted else GREEN, force=True)
-        elif key in ("micsrc", "mic_laptop", "mic_phone", "mic_off"):
+        elif key in ("micsrc", "mic_auto", "mic_laptop", "mic_phone", "mic_off"):
             if not self.router.cable_ok:
                 self.toast("Needs the VB-Audio cable output (right-click \u2192 Send game sound to stream)", AMBER)
             else:
@@ -342,7 +342,9 @@ class App:
                 self.router.mic_muted = False
                 self.save()
                 msg = "Stream mic: " + MIC_LABEL[src]
-                if src == "phone" and not self.router.mic_active:
+                if src == "auto":
+                    msg += "  (iPhone mic; laptop mic when the iPhone mic is silent)"
+                elif src == "phone" and not self.router.mic_active:
                     msg += "  -  turn ON Microphone in the iPhone Start Broadcast sheet"
                 elif src == "laptop" and not self.router.mic_ready:
                     msg += f"  -  cannot open it ({self.router.laptop_mic.error})"
@@ -404,7 +406,8 @@ class App:
             ("cable", "Send game sound to stream (VB-Cable)", self.router.cable_ok, bool(self.router.cable_name)),
             ("mute", "Laptop sound off\tM", self.audio.muted, True),
             None,
-            ("mic_laptop", "Stream mic: Laptop / headset mic\tV", self.router.mic_source == "laptop", self.router.cable_ok),
+            ("mic_auto", "Stream mic: Auto (iPhone, else laptop)\tV", self.router.mic_source == "auto", self.router.cable_ok),
+            ("mic_laptop", "Stream mic: Laptop / headset mic", self.router.mic_source == "laptop", self.router.cable_ok),
             ("mic_phone", "Stream mic: iPhone mic", self.router.mic_source == "phone", self.router.cable_ok),
             ("mic_off", "Stream mic: none (use TikTok / OBS mic)", self.router.mic_source == "off", self.router.cable_ok),
             ("micmute", "Mute stream mic\tN", self.router.mic_muted, self.router.mic_source != "off"),
@@ -584,7 +587,9 @@ class App:
             "sep",
             "meter",
             ("micsrc", "micoff" if self.router.mic_muted or self.router.mic_source == "off" else "mic",
-             f"Stream mic: {MIC_LABEL[self.router.mic_source]}  -  click / V to switch, N to mute",
+             f"Stream mic: {MIC_LABEL[self.router.mic_source]}"
+             f"{' (' + self.router.effective_mic + ')' if self.router.mic_source == 'auto' else ''}"
+             "  -  click / V to switch, N to mute",
              self.router.mic_source != "off",
              RED if self.router.mic_muted else (AMBER if self.router.mic_source != "off" and not self.router.mic_ready
                                                 else None)),
@@ -747,7 +752,9 @@ class App:
             (self.audio.device_name or "-") + "   \u00b7   M = on/off")
         if rt.mic_source != "off" and rt.cable_ok and rt.mic_ready:
             state = "MUTED (N to unmute)" if rt.mic_muted else f"ON - in the stream  ({self.cfg['mic_gain']} %)"
-            src = rt.laptop_mic.device_name if rt.mic_source == "laptop" else "iPhone mic"
+            src = rt.laptop_mic.device_name if rt.effective_mic == "laptop" else "iPhone mic"
+            if rt.mic_source == "auto":
+                src = "Auto: " + src
             scr.blit(p.text(p.f_ui_b, "Microphone (V)", DIM), (x0, y))
             scr.blit(p.text(p.f_ui, f"{src}  \u2192  {state}", RED if rt.mic_muted else GREEN), (col2, y))
             y += p.px(26)
@@ -806,6 +813,8 @@ class App:
             right.append((f"{MIC_LABEL[rt.mic_source]}: MUTED", RED))
         elif not rt.mic_ready:
             right.append((f"{MIC_LABEL[rt.mic_source]}: not available", AMBER))
+        elif rt.mic_source == "auto":
+            right.append((f"Auto mic: {'iPhone' if rt.effective_mic == 'phone' else 'laptop'}", GREEN))
         else:
             right.append((f"{MIC_LABEL[rt.mic_source]}: on", GREEN))
         if self.router.cable_ok:
@@ -1002,6 +1011,7 @@ class App:
                   f"audio buf {a.buffered_ms:.0f}/{a.target_ms} ms, underruns {a.underruns}, skips {a.skips}, "
                   f"speed fixes {a.corrections}{' MUTED' if a.muted else ''}"
                   f"{' | REC ' + fmt_time(self.rec.elapsed) if self.rec.active else ''}", flush=True)
+            print(f"[mic] {time.strftime('%H:%M:%S')} {self.router.mic_report()}", flush=True)
         return True
 
     def run(self):

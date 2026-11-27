@@ -184,6 +184,8 @@ final class AppModel: ObservableObject {
     @Published var portrait = false { didSet { defaults.set(portrait, forKey: "portrait") } }
     @Published var micVolume: Double = 1.0 { didSet { defaults.set(micVolume, forKey: "micVolume") } }
     @Published var gameVolume: Double = 1.0 { didSet { defaults.set(gameVolume, forKey: "gameVolume") } }
+    /// The app records your voice itself (normal mode = the game is NOT turned down).
+    @Published var appMic = true { didSet { defaults.set(appMic, forKey: "appMic") } }
 
     // live status from the extension
     @Published var live = LiveStatus()
@@ -209,6 +211,7 @@ final class AppModel: ObservableObject {
         qualityID = defaults.string(forKey: "quality") ?? "hd"
         portrait = defaults.bool(forKey: "portrait")
         if defaults.object(forKey: "micVolume") != nil { micVolume = defaults.double(forKey: "micVolume") }
+        if defaults.object(forKey: "appMic") != nil { appMic = defaults.bool(forKey: "appMic") }
         if defaults.object(forKey: "gameVolume") != nil { gameVolume = defaults.double(forKey: "gameVolume") }
         fit = defaults.string(forKey: "look.fit") ?? "blur"
         if defaults.object(forKey: "look.logoCorner") != nil { logoCorner = defaults.integer(forKey: "look.logoCorner") }
@@ -241,6 +244,7 @@ final class AppModel: ObservableObject {
         c.gameVolume = gameVolume
         c.privacy = privacy
         c.micMuted = micMuted
+        c.appMic = appMic
         c.fit = fit
         c.logo = logoBase64
         c.logoCorner = logoCorner
@@ -286,6 +290,7 @@ final class AppModel: ObservableObject {
 
     func start() {
         startConfigServer()
+        MicSender.shared.listen()          // your voice for Go Live (starts only when a live starts)
         startBonjour()
         refreshAddresses()
         timer?.invalidate()

@@ -250,7 +250,13 @@ struct GoLiveView: View {
                 Text("Sound").font(.headline).foregroundColor(.white)
                 volumeRow("Game sound", symbol: "gamecontroller.fill", value: $model.gameVolume)
                 volumeRow("Your voice (mic)", symbol: "mic.fill", value: $model.micVolume)
-                Text("Your voice is only included if you tap Microphone ON in the Start Broadcast sheet.")
+                Toggle(isOn: $model.appMic) {
+                    Text("Den-Dev Live mic (game stays loud)").foregroundColor(.white)
+                }
+                .tint(.pink)
+                Text(model.appMic
+                     ? "The app records your voice. Keep Microphone OFF in the Start Broadcast sheet, so iOS does not turn the game sound down."
+                     : "Your voice is only included if you tap Microphone ON in the Start Broadcast sheet (iOS then makes the game quieter).")
                     .font(.caption).foregroundColor(Theme.faint)
             }
         }

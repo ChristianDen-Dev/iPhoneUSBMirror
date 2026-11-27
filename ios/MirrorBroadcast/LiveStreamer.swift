@@ -460,6 +460,19 @@ final class AudioClock {
         lock.unlock()
     }
 
+    /// Your voice from the Den-Dev Live app (48 kHz mono 16-bit samples).
+    func pushMicPCM(_ samples: UnsafeBufferPointer<Int16>) {
+        let f = samples.map { Float($0) / 32768 }
+        lock.lock()
+        mic.left.append(contentsOf: f)
+        mic.right.append(contentsOf: f)
+        if mic.left.count > maxKeep {
+            let drop = mic.left.count - target
+            mic.left.removeFirst(drop); mic.right.removeFirst(drop)
+        }
+        lock.unlock()
+    }
+
     @inline(__always) private static func soft(_ x: Float) -> Float {
         let a = abs(x)
         if a <= 0.85 { return x }
@@ -511,6 +524,57 @@ final class AudioClock {
     }
 }
 
+// MARK: - your voice from the app
+
+/// Connects to the Den-Dev Live app (127.0.0.1:2398) and receives your voice.
+/// The app records in normal mode, so iOS does not turn the game down.
+final class MicReceiver: @unchecked Sendable {
+    var onSamples: ((UnsafeBufferPointer<Int16>) -> Void)?
+    private let queue = DispatchQueue(label: "live.mic")
+    private var conn: NWConnection?
+    private var leftover: UInt8?          // half a sample from the last piece
+    private var running = false
+
+    func start() { queue.async { self.running = true; self.connect() } }
+    func stop() { queue.async { self.running = false; self.conn?.cancel(); self.conn = nil } }
+
+    private func connect() {
+        guard running else { return }
+        leftover = nil
+        let c = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: LinkPorts.mic)!, using: .tcp)
+        c.stateUpdateHandler = { [weak self] st in
+            switch st {
+            case .failed, .cancelled: self?.retry(c)
+            default: break
+            }
+        }
+        conn = c
+        c.start(queue: queue)
+        receive(c)
+    }
+
+    private func retry(_ c: NWConnection) {
+        guard conn === c else { return }
+        conn = nil
+        queue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.connect() }   // app closed? try again
+    }
+
+    private func receive(_ c: NWConnection) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, done, err in
+            guard let self = self else { return }
+            if var d = data, !d.isEmpty {
+                if let b = self.leftover { d.insert(b, at: 0); self.leftover = nil }
+                if d.count % 2 == 1 { self.leftover = d.removeLast() }
+                d.withUnsafeBytes { raw in
+                    self.onSamples?(raw.bindMemory(to: Int16.self))
+                }
+            }
+            if done || err != nil { c.cancel(); return }
+            self.receive(c)
+        }
+    }
+}
+
 // MARK: - live streamer
 
 final class LiveStreamer: @unchecked Sendable {
@@ -521,6 +585,8 @@ final class LiveStreamer: @unchecked Sendable {
     private let compositor: Compositor
     private let mixer = MediaMixer(captureSessionMode: .manual, multiTrackAudioMixingEnabled: false)
     private let audioClock = AudioClock()
+    private let micReceiver = MicReceiver()
+    private var appMicAt: CFAbsoluteTime = 0      // last time the app sent your voice
     private var session: (any Session)?
     private let statusServer = MirrorServer(port: LinkPorts.status)
 
@@ -600,6 +666,18 @@ final class LiveStreamer: @unchecked Sendable {
 
         startIdleTimer()
         startSilentClock()
+        if cfg.appMic {
+            micReceiver.onSamples = { [weak self] samples in
+                guard let self = self else { return }
+                self.lock.lock()
+                self.appMicAt = CFAbsoluteTimeGetCurrent()
+                self.micSeen = true
+                let muted = self.micMuted
+                self.lock.unlock()
+                if !muted { self.audioClock.pushMicPCM(samples) }
+            }
+            micReceiver.start()
+        }
         Task { await self.setUp(url) }
     }
 
@@ -607,6 +685,7 @@ final class LiveStreamer: @unchecked Sendable {
         lock.lock(); stopped = true; lock.unlock()
         idleTimer?.cancel(); idleTimer = nil
         silentTimer?.cancel(); silentTimer = nil
+        micReceiver.stop()
         feed?.finish()
         audioFeed?.finish()
         setState("ended")
@@ -766,9 +845,13 @@ final class LiveStreamer: @unchecked Sendable {
             _ = feed
             audioClock.push(sb, isMic: false)
         case .audioMic:
+            lock.lock()
             micSeen = true
-            lock.lock(); let muted = micMuted; lock.unlock()
-            if !muted { audioClock.push(sb, isMic: true) }
+            let muted = micMuted
+            // the app already sends your voice: do not add it twice
+            let appMicOn = CFAbsoluteTimeGetCurrent() - appMicAt < 1.0
+            lock.unlock()
+            if !muted && !appMicOn { audioClock.push(sb, isMic: true) }
         @unknown default:
             break
         }

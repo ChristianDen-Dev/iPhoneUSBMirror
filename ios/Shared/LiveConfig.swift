@@ -15,6 +15,7 @@ import Network
 enum LinkPorts {
     static let config: UInt16 = 2399     // app -> extension: settings
     static let status: UInt16 = 2347     // extension -> app: live status
+    static let mic: UInt16 = 2398        // app -> extension: your voice (48 kHz mono 16-bit)
 }
 
 /// What the broadcast should do.
@@ -33,6 +34,9 @@ struct LiveConfig: Codable, Equatable {
     // live controls (the extension asks for these again every second)
     var privacy: Bool = false             // viewers see "Be right back" instead of the screen
     var micMuted: Bool = false            // your voice is not sent
+    /// true = the app records your voice (game stays at normal volume);
+    /// false = only the Microphone switch of the Start Broadcast sheet is used.
+    var appMic: Bool = true
     // stream look ("Studio"); changes show on the live within ~1 s
     var fit: String = "blur"              // fit (black bars) / blur (fit + blurred background) / fill (crop)
     var logo: String = ""                 // PNG, base64 ("" = none)

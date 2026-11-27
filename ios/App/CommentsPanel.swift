@@ -409,8 +409,11 @@ final class ChatPiP: NSObject, ObservableObject, AVPictureInPictureControllerDel
     private func setUp() {
         guard controller == nil, supported else { return }
         // PiP needs an active playback audio session; mix so the game sound is not touched
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
-        try? AVAudioSession.sharedInstance().setActive(true)
+        let session = AVAudioSession.sharedInstance()
+        if session.category != .playAndRecord {        // the Den-Dev Live mic may be recording: keep it
+            try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        }
+        try? session.setActive(true)
         displayLayer.videoGravity = .resizeAspect
         let source = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: displayLayer, playbackDelegate: self)
         let c = AVPictureInPictureController(contentSource: source)

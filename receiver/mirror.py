@@ -54,7 +54,7 @@ DEFAULTS = {
     "mic_gain": 100,                 # mic loudness in the stream, %
     "window_w": 1280,
     "window_h": 800,
-    "wifi_search": True,             # also look for phones on Wi-Fi (no cable)
+    "link_mode": "auto",             # connection: "auto" (USB first, then Wi-Fi) / "usb" / "wifi"
     "wifi_hosts": [],                # iPhone Wi-Fi IPs that worked before
     "android_hosts": [],             # Android phones switched to Wi-Fi before
     "android_keep_sound": False,     # Android 13+: game sound also stays on the phone
@@ -76,12 +76,17 @@ HELP_ROWS = [
     ("S", "Sharpen when the picture is enlarged"),
     ("F1", "Statistics"),
     ("O", "Open recordings folder"),
+    ("L", "Connection: Auto \u2192 USB only \u2192 Wi-Fi only"),
     ("W", "Find the iPhone on Wi-Fi now"),
     ("Click / drag", "Android: tap / swipe on the phone"),
     ("Backspace / Home / End", "Android: Back / Home / Recent apps"),
     ("Right-click", "All options"),
 ]
 
+
+LINK_MODES = ("auto", "usb", "wifi")
+LINK_LABEL = {"auto": "Auto (USB first, then Wi-Fi)", "usb": "USB cable only", "wifi": "Wi-Fi only"}
+LINK_ICON = {"auto": "linkauto", "usb": "usb", "wifi": "wifi"}
 
 MIC_SOURCES = ("auto", "laptop", "phone", "off")
 MIC_LABEL = {"auto": "Auto mic", "laptop": "Laptop mic", "phone": "iPhone mic", "off": "No mic (TikTok/OBS mic)"}
@@ -139,7 +144,9 @@ class App:
         s = self.s = Shared()
         s.flip_landscape = self.cfg["flip_landscape"]
         s.sharpen = self.cfg["sharpen"]
-        s.wifi_search = self.cfg["wifi_search"]
+        if self.cfg["link_mode"] not in LINK_MODES:
+            self.cfg["link_mode"] = "auto"
+        s.link_mode = self.cfg["link_mode"]
         s.wifi_hosts = list(self.cfg["wifi_hosts"])
         s.android_hosts = list(self.cfg["android_hosts"])
         s.android_keep_sound = self.cfg["android_keep_sound"]
@@ -399,16 +406,21 @@ class App:
                 import android
                 ctl.key({"aback": android.KEY_BACK, "ahome": android.KEY_HOME,
                          "aapps": android.KEY_APP_SWITCH}[key])
+        elif key in ("link", "link_auto", "link_usb", "link_wifi"):
+            mode = (LINK_MODES[(LINK_MODES.index(s.link_mode) + 1) % len(LINK_MODES)] if key == "link"
+                    else key[5:])
+            self.cfg["link_mode"] = mode
+            self.receiver.set_link_mode(mode)
+            self.save()
+            tip = {"auto": "uses the cable when plugged in, otherwise Wi-Fi",
+                   "usb": "lowest delay - Wi-Fi is not used",
+                   "wifi": "no cable - same Wi-Fi or the iPhone Hotspot"}[mode]
+            self.toast(f"Connection: {LINK_LABEL[mode]}  -  {tip}", ACCENT, force=True)
         elif key == "wifi_scan":
-            if not s.wifi_search:
-                s.wifi_search = self.cfg["wifi_search"] = True
-                self.save()
+            if s.link_mode == "usb":
+                self.do("link_auto")
             self.receiver.wifi.scan_now.set()
             self.toast("Looking for the iPhone on Wi-Fi...  (start the broadcast on the iPhone)", ACCENT)
-        elif key == "wifi_toggle":
-            s.wifi_search = self.cfg["wifi_search"] = not s.wifi_search
-            self.save()
-            self.toast(f"Wi-Fi mirroring {'on' if s.wifi_search else 'off (USB only)'}")
         elif key == "android_wifi":
             self.receiver.android_to_wifi()
         elif key == "android_sound":
@@ -461,7 +473,9 @@ class App:
             ("vol-", "Laptop volume down\tDown", False, self.cfg["volume"] > 0),
             None,
             ("wifi_scan", "Find iPhone on Wi-Fi now\tW", False, True),
-            ("wifi_toggle", "Wi-Fi mirroring (look for phones on Wi-Fi)", self.s.wifi_search, True),
+            ("link_auto", "Connection: Auto (USB first, then Wi-Fi)\tL", self.s.link_mode == "auto", True),
+            ("link_usb", "Connection: USB cable only", self.s.link_mode == "usb", True),
+            ("link_wifi", "Connection: Wi-Fi only", self.s.link_mode == "wifi", True),
             ("android_wifi", "Android: switch to Wi-Fi (then unplug the cable)", False,
              self.s.device_kind == "Android" and self.s.link_name == "USB"),
             ("android_sound", "Android: keep game sound on the phone too (Android 13+)",
@@ -500,7 +514,7 @@ class App:
         pygame.K_PLUS: "vol+", pygame.K_KP_PLUS: "vol+", pygame.K_MINUS: "vol-", pygame.K_KP_MINUS: "vol-",
         pygame.K_t: "pin", pygame.K_r: "flip", pygame.K_s: "sharpen", pygame.K_F1: "stats",
         pygame.K_o: "folder", pygame.K_h: "help", pygame.K_a: "sound", pygame.K_n: "micmute", pygame.K_v: "micsrc",
-        pygame.K_w: "wifi_scan", pygame.K_BACKSPACE: "aback", pygame.K_HOME: "ahome", pygame.K_END: "aapps",
+        pygame.K_w: "wifi_scan", pygame.K_l: "link", pygame.K_BACKSPACE: "aback", pygame.K_HOME: "ahome", pygame.K_END: "aapps",
     }
 
     def touch(self, action, pos):
@@ -651,12 +665,17 @@ class App:
                     "android_unauth": ("Android found - tap Allow on the phone", AMBER),
                     "android_error": ("Android found - could not start", RED)}.get(
                         self.s.found, ("Phone found", ACCENT))
-        return "Waiting for a phone (USB or Wi-Fi)", AMBER
+        return {"auto": "Waiting for a phone (USB or Wi-Fi)", "usb": "Waiting for a phone (USB cable)",
+                "wifi": "Waiting for a phone (Wi-Fi)"}[self.s.link_mode], AMBER
 
     def toolbar_specs(self):
         a, s, c = self.audio, self.s, self.cfg
         rec = self.rec.active
         return [
+            ("link", LINK_ICON[s.link_mode],
+             f"Connection: {LINK_LABEL[s.link_mode]}  -  click / L to switch"
+             + (f"  (now: {s.link_name})" if s.link_name else ""), True, None),
+            "sep",
             ("stream", "stream", "Stream Mode: clean picture for OBS / TikTok (F2)", self.stream_mode, None),
             ("full", "unfull" if self.fullscreen else "full", "Fullscreen (F11)", self.fullscreen, None),
             "sep",
@@ -961,7 +980,7 @@ class App:
             tip = "Problem: " + self.s.hint
         elif found == "android_unauth":
             tip = "On the phone: tick 'Always allow from this computer' \u2192 Allow"
-        elif not found and st == ST_NO_USB and self.s.wifi_search:
+        elif not found and st == ST_NO_USB and self.s.wifi_allowed:
             tip = "Wi-Fi: phone and laptop on the same Wi-Fi, start the broadcast, press W to search"
         t = p.text(p.f_small, tip, DIM)
         if t.get_width() < card.width - p.px(56):

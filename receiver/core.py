@@ -105,7 +105,7 @@ class Shared:
         self.control = None          # android.AndroidControl while an Android phone is connected
         self.notices = collections.deque()   # (text, kind) messages for the window
         # Wi-Fi settings (the window loads/saves them)
-        self.wifi_search = True      # look for the iPhone on Wi-Fi when nothing is connected
+        self.link_mode = "auto"      # "auto" (USB first, then Wi-Fi) / "usb" (cable only) / "wifi" (Wi-Fi only)
         self.wifi_hosts = []         # iPhone IPs that worked before (newest first)
         self.android_hosts = []      # Android IPs switched to Wi-Fi before
         self.android_keep_sound = False   # Android 13+: sound also stays on the phone
@@ -136,6 +136,14 @@ class Shared:
         """iPhone heat level from the INFO text: nominal / fair / serious / critical."""
         m = re.search(r"thermal (\w+)", self.info or "")
         return m.group(1).lower() if m else ""
+
+    @property
+    def usb_allowed(self):
+        return self.link_mode != "wifi"
+
+    @property
+    def wifi_allowed(self):
+        return self.link_mode != "usb"
 
     def remember(self, attr, host):
         hosts = [h for h in getattr(self, attr) if h != host]
@@ -498,7 +506,7 @@ class WiFiFinder(threading.Thread):
 
     def run(self):
         while self.s.running:
-            if self.s.wifi_search and self.s.state != ST_CONNECTED:
+            if self.s.wifi_allowed and self.s.state != ST_CONNECTED:
                 try:
                     hits = self.scan()
                 except Exception as e:
@@ -531,6 +539,7 @@ class Receiver(threading.Thread):
         self.android_session = None
         self._android_retry_at = 0.0
         self._handoff = None                    # USB socket found while streaming over Wi-Fi
+        self._android_switching = False         # Wi-Fi-only mode: turning a USB Android into Wi-Fi
         self._sock = None
         if not self.android_ok:
             print("[android] adb / scrcpy-server not found in vendor/android - Android support off", flush=True)
@@ -568,7 +577,7 @@ class Receiver(threading.Thread):
                 return None
             self.link = ("wifi", host, base)
             return sock
-        if not self.s.wifi_search:
+        if not self.s.wifi_allowed:
             return None
         for host in self.wifi.candidates():
             try:
@@ -585,7 +594,7 @@ class Receiver(threading.Thread):
             self._handoff = None
             if sock is not None:
                 self.link = ("usb",)
-            elif not self.tcp_address:
+            elif not self.tcp_address and self.s.usb_allowed:
                 try:
                     sock = self.usb_socket()
                     self.link = ("usb",)
@@ -622,6 +631,7 @@ class Receiver(threading.Thread):
         print(f"[mirror] {time.strftime('%H:%M:%S')} connected to iPhone {where}", flush=True)
         if wifi and not self.tcp_address:
             s.remember("wifi_hosts", self.link[1])
+        if wifi and not self.tcp_address and s.link_mode == "auto":
             threading.Thread(target=self._watch_usb, args=(sock,), daemon=True, name="usb-watch").start()
         try:
             self.stream(sock)
@@ -638,7 +648,7 @@ class Receiver(threading.Thread):
     def _watch_usb(self, wifi_sock):
         """While on Wi-Fi: as soon as the iPhone is plugged in, move to USB
         (lower delay, no Wi-Fi stutters)."""
-        while self.s.running and self._sock is wifi_sock:
+        while self.s.running and self._sock is wifi_sock and self.s.link_mode == "auto":
             time.sleep(2.0)
             try:
                 usb = self.usb_socket()
@@ -672,13 +682,22 @@ class Receiver(threading.Thread):
         """Mirror an Android phone if one is ready. True = a session ran."""
         devs = android.list_devices()
         ready = [d for d, st in devs if st == "device"]
+        mode = self.s.link_mode
+        if mode == "usb":
+            ready = [d for d in ready if not android.is_wifi_serial(d)]
+        elif mode == "wifi":
+            on_usb = [d for d in ready if not android.is_wifi_serial(d)]
+            ready = [d for d in ready if android.is_wifi_serial(d)]
+            if not ready and on_usb and not self._android_switching:
+                self._switch_android_to_wifi(on_usb[0])     # Wi-Fi only: do it for the user
+                return False
         if not ready:
             if any(st == "unauthorized" for _, st in devs):
                 self.s.found = "android_unauth"
             elif self.s.found.startswith("android"):
                 self.s.found, self.s.hint = "", ""
             now = time.monotonic()
-            if self.s.android_hosts and now >= self._android_retry_at:   # phone switched to Wi-Fi before
+            if self.s.wifi_allowed and self.s.android_hosts and now >= self._android_retry_at:   # phone switched to Wi-Fi before
                 self._android_retry_at = now + 10
                 for host in list(self.s.android_hosts)[:2]:
                     threading.Thread(target=android.connect_wifi, args=(host,), daemon=True).start()
@@ -747,6 +766,38 @@ class Receiver(threading.Thread):
                 self.handle_audio(pts, pcm)
         except Exception:
             pass                                # the video loop reports the end
+
+    def _switch_android_to_wifi(self, serial):
+        self._android_switching = True
+
+        def work():
+            try:
+                self.s.notice("Wi-Fi only: moving the Android phone to Wi-Fi...", "info")
+                ip, msg = android.enable_wifi(serial)
+                if ip:
+                    self.s.remember("android_hosts", ip)
+                    self.s.notice(f"Android on Wi-Fi ({ip}) - you can unplug the cable", "good")
+                else:
+                    self.s.notice(f"Android Wi-Fi failed: {msg}", "warn")
+            finally:
+                self._android_switching = False
+        threading.Thread(target=work, daemon=True, name="android-wifi").start()
+
+    def set_link_mode(self, mode):
+        """Auto / USB only / Wi-Fi only. Drops a connection the new mode does not allow."""
+        s = self.s
+        s.link_mode = mode
+        wrong = ((mode == "usb" and s.link_name == "Wi-Fi") or (mode == "wifi" and s.link_name == "USB"))
+        if s.state == ST_CONNECTED and wrong:
+            if self.android_session:
+                self.android_restart()
+            elif self._sock is not None:
+                try:
+                    self._sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+        if s.wifi_allowed:
+            self.wifi.scan_now.set()
 
     def android_restart(self):
         """Reconnect the Android phone (new settings take effect)."""

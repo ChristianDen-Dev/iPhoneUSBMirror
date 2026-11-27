@@ -129,6 +129,7 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - iOS (run 46065362382): `MirrorServer` now listens on all addresses (USB via 127.0.0.1 still works); Wi-Fi clients get **12 Mbps** (USB 20); INFO shows `link wifi|usb`; app asks for **Local Network** permission (Bonjour `_usbmirror._tcp`) and shows the iPhone's Wi-Fi / Hotspot IP.
 - Receiver: order = iPhone USB → Android → iPhone Wi-Fi. `WiFiFinder` tries remembered IPs, the Hotspot address 172.20.10.1, and a ~1 s non-blocking scan of the laptop's /24 for port 2345 (every 15 s while idle; **W** = now). While on Wi-Fi it checks USB every 2 s and **switches to USB** when the cable is plugged in. Sound-only channel 2346 follows the same link.
 - Tested with `fake_iphone.py` through the Wi-Fi code path (`--tcp`): connects, GPU decode, sound OK. Real iPhone test pending (needs the new .ipa via Sideloadly).
+- **Connection button** (first toolbar button, key **L**, menu radio items): Auto (USB first, then Wi-Fi; auto-switch to USB when plugged) / USB only / Wi-Fi only. Saved as `link_mode`. Changing it drops a connection the new mode does not allow. Wi-Fi only + Android on USB = moves the phone to Wi-Fi automatically (adb tcpip).
 - Honest limit: Wi-Fi adds ~5-30 ms and can stutter on busy 2.4 GHz; USB stays the lowest delay. Best wireless: 5 GHz router or the laptop on the iPhone Hotspot.
 
 ## Phase 11 — Android (2026-11-28)

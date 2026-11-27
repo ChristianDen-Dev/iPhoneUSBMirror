@@ -34,8 +34,10 @@ IPHONE
          "find devices on your local network" -> Allow.
   Then: open USB Mirror on the iPhone -> round button -> iPhone USB Mirror
         -> Start Broadcast. The picture appears by itself (W = search Wi-Fi now).
-  USB has the lowest delay. If you plug the cable in while on Wi-Fi, the
-  mirror switches to USB by itself.
+  First toolbar button (or L) chooses the connection:
+    Auto = cable when plugged in, otherwise Wi-Fi  |  USB only  |  Wi-Fi only
+  USB has the lowest delay. In Auto, plugging the cable in while on Wi-Fi
+  switches to USB by itself.
 
   Free Apple ID: the app stops opening after 7 days. Re-install it:
     1. Stop the broadcast on the iPhone.
@@ -73,6 +75,7 @@ OBS / TIKTOK LIVE STUDIO
 KEYS
   F2 Stream Mode   F11 fullscreen   F12 screenshot   F9 record   M laptop sound
   A sound panel    V stream mic     N mute mic       W find iPhone on Wi-Fi
+  L or the first toolbar button = connection: Auto / USB only / Wi-Fi only
   H all keys       Right-click = all options
 
 

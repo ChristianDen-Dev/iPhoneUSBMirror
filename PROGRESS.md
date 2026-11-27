@@ -49,8 +49,17 @@ Read this first when resuming work.
 - `docs\PROTOCOL.md` written.
 - `.github\workflows\build-ios.yml` written (Phase 4).
 
+## Phase 4 — Cloud build ✅ (2026-11-27)
+- GitHub account `ChristianDen-Dev`; gh token scopes include `workflow` (needed to push workflow files).
+- Repo-local git identity uses the GitHub noreply email (personal email never committed).
+- Public repo: https://github.com/ChristianDen-Dev/iPhoneUSBMirror
+- First build (run 46028002248) passed in 32 s on Xcode 26.6: no Swift errors/warnings; extension Info.plist verified inside the .ipa.
+- Added `UIRequiresFullScreen` to silence the portrait-only warning.
+- `.ipa` downloaded to `build\iPhoneUSBMirror.ipa` (git-ignored).
+- Re-download a fresh build: `gh run download <run-id> --name iPhoneUSBMirror-ipa --dir build`
+
 ## Next
-- Phase 4: `gh auth login` (user), choose repo name, set repo-local git identity (noreply), commit, create public repo, push, watch build.
+- Phase 5: user installs `build\iPhoneUSBMirror.ipa` with Sideloadly, enables Developer Mode, trusts the profile, checks the broadcast list.
 
 ## Problems / notes
 - Git has no author identity yet. The repo will be public, so after `gh auth login` set a **repo-local** identity with the GitHub noreply email (`<id>+<login>@users.noreply.github.com`), then make the first commit (files are staged).

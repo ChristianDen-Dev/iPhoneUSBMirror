@@ -46,6 +46,7 @@ targets:
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities: [arm64]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true          # allows portrait-only without an Xcode warning
         UIApplicationSupportsIndirectInputEvents: true
     dependencies:
       - target: MirrorBroadcast

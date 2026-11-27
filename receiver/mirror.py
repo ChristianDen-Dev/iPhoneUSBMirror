@@ -57,6 +57,21 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 ROTATION_K = {1: 0, 2: 0, 3: 2, 4: 2, 5: 3, 6: 1, 7: 1, 8: 3}
 
 
+H264_PROFILES = {66: "Baseline", 77: "Main", 88: "Extended", 100: "High"}
+
+
+def describe_sps(annexb: bytes) -> str:
+    """'H.264 High' etc. from the SPS inside an Annex-B parameter-set blob."""
+    i = annexb.find(b"\x00\x00\x01")
+    while i != -1 and i + 4 < len(annexb):
+        nal = annexb[i + 3]
+        if nal & 0x1F == 7:                     # SPS: profile_idc follows the NAL header
+            prof = annexb[i + 4]
+            return f"H.264 {H264_PROFILES.get(prof, prof)}"
+        i = annexb.find(b"\x00\x00\x01", i + 3)
+    return "H.264 (unknown profile)"
+
+
 class NoDeviceError(Exception):
     pass
 
@@ -225,7 +240,12 @@ class Receiver(threading.Thread):
 
             if ptype == T_VIDEO_CONFIG:
                 if length >= 4:
-                    config = bytes(payload[4:])
+                    new_config = bytes(payload[4:])
+                    if new_config != config:
+                        w, h = struct.unpack(">HH", bytes(payload[:4]))
+                        print(f"[mirror] {time.strftime('%H:%M:%S')} stream: {describe_sps(new_config)}, {w}x{h}",
+                              flush=True)
+                    config = new_config
             elif ptype == T_VIDEO_FRAME:
                 is_key = bool(flags & FLAG_KEYFRAME)
                 if need_keyframe and not is_key:

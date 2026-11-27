@@ -8,7 +8,7 @@ Input: raw PCM, 48 kHz, signed 16-bit little-endian, stereo interleaved
 Low-latency jitter buffer:
   - plays through WASAPI (~20 ms) instead of the old MME path (~90 ms)
   - start playing once the target amount of audio is buffered; the target
-    is ADAPTIVE: starts at 40 ms, grows 10 ms per dropout, shrinks slowly
+    is ADAPTIVE: starts at 30 ms, grows 10 ms per dropout, shrinks slowly
   - SMOOTH DRIFT CORRECTION: when the buffer is more than DRIFT_BAND_MS away
     from the target, play ~1 % faster or slower (inaudible) until it is back.
     This replaces sudden jumps, which sounded like small clicks.
@@ -27,7 +27,7 @@ RATE = 48_000
 CHANNELS = 2
 BYTES_PER_FRAME = 4            # s16 * 2 channels
 BLOCK_FRAMES = 240             # 5 ms per callback
-TARGET_MS = 40                 # buffer we START with (small = low delay)
+TARGET_MS = 30                 # buffer we START with (small = low delay)
 TARGET_MAX_MS = 120            # ADAPTIVE: each underrun adds 10 ms, up to this
 TARGET_RELAX_S = 30            # ... and after this long without underruns it shrinks 5 ms
 DRIFT_BAND_MS = 20             # outside target +/- this: speed up / slow down slightly

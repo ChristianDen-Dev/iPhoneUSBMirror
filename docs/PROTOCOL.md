@@ -55,3 +55,13 @@ The receiver's `R` key can still flip landscape 180° if ever needed.
   Audio is only dropped if more than 2 MB is backed up.
 - Video: H.264 High profile, no B-frames, ~20 Mbps average (30 Mbps cap), keyframe ≥ every 2 s,
   long side ≤ 1920 px (iPhone 14 Pro Max: 1290×2796 → 886×1920).
+
+
+## Sound-only channel (port 2346)
+
+Newer iPhone builds also listen on **127.0.0.1:2346**. When a receiver is
+connected there, AUDIO_PCM packets (same 14-byte header) are sent ONLY on that
+connection, so sound never waits behind large video frames on the phone. The
+receiver connects it after the main connection is up; if the port is closed
+(older app), sound keeps arriving on the main connection (2345). Heartbeats
+(type 5) are also sent there every second.

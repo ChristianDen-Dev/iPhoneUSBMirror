@@ -26,6 +26,7 @@ import numpy as np
 from pymobiledevice3 import usbmux
 
 DEVICE_PORT = 2345
+AUDIO_PORT = 2346               # sound-only channel (newer iPhone app); falls back to the main one
 SOCKET_TIMEOUT_S = 3.0          # iPhone sends a heartbeat every 1 s
 MAX_PAYLOAD = 8 * 1024 * 1024   # sanity limit for one packet
 
@@ -84,6 +85,8 @@ class Shared:
         self.codec = ""              # "H.264 High"
         self.decoder_name = ""
         self.info = ""               # last diagnostic text from the iPhone
+        self.sync_text = ""          # last audio timing report (SyncMeter)
+        self.audio_channel = "main"  # "separate" when the sound-only channel is connected
         self.bytes_total = 0
         self.frames_in = 0           # decoded frames (= what the iPhone sends)
         self.frames_decoded = 0      # frames prepared for the window
@@ -265,30 +268,149 @@ class FrameRenderer:
 
 
 # --------------------------------------------------------------------------
+class SyncMeter:
+    """Measures the sound path every 5 s (for tuning the audio delay):
+    - size of the sound pieces the iPhone sends and gaps between them
+    - how much LATER sound arrives than video, compared with the moment the
+      iPhone captured each one (same iPhone clock for both)."""
+    PERIOD_S = 5.0
+
+    def __init__(self):
+        self.t0 = time.perf_counter()
+        self._reset()
+
+    def _reset(self):
+        self.chunks, self.chunk_ms_max, self.chunk_ms_sum = 0, 0.0, 0.0
+        self.gap_max = 0.0
+        self.last_audio_arrival = None
+        self.a_min = self.v_min = None      # min(arrival - capture) in ms
+        self.a_max = None
+        self.video_bytes_since_audio = 0
+        self.samples = []                   # (offset ms, video bytes just before)
+
+    def _now_ms(self):
+        return (time.perf_counter() - self.t0) * 1000
+
+    def video(self, ts_us, nbytes=0):
+        self.video_bytes_since_audio += nbytes
+        off = self._now_ms() - ts_us / 1000
+        self.v_min = off if self.v_min is None else min(self.v_min, off)
+
+    def audio(self, ts_us, nbytes):
+        now = self._now_ms()
+        off = now - ts_us / 1000
+        self.a_min = off if self.a_min is None else min(self.a_min, off)
+        self.a_max = off if self.a_max is None else max(self.a_max, off)
+        self.samples.append((off, self.video_bytes_since_audio))
+        self.video_bytes_since_audio = 0
+        ms = nbytes / 192.0                 # 48 kHz * 2 ch * 2 bytes = 192 bytes per ms
+        self.chunks += 1
+        self.chunk_ms_sum += ms
+        self.chunk_ms_max = max(self.chunk_ms_max, ms)
+        if self.last_audio_arrival is not None:
+            self.gap_max = max(self.gap_max, now - self.last_audio_arrival)
+        self.last_audio_arrival = now
+
+    def report(self):
+        if self._now_ms() / 1000 < self.PERIOD_S:
+            return None
+        text = None
+        if self.chunks:
+            lag = (self.a_min - self.v_min) if (self.a_min is not None and self.v_min is not None) else 0.0
+            text = (f"audio pieces {self.chunks / self.PERIOD_S:.0f}/s, avg {self.chunk_ms_sum / self.chunks:.1f} ms, "
+                    f"max {self.chunk_ms_max:.1f} ms, biggest gap {self.gap_max:.0f} ms, "
+                    f"JITTER {self.a_max - self.a_min:.0f} ms | "
+                    f"sound arrives {lag:+.0f} ms vs video (capture-to-arrival)")
+        if text and self.samples:
+            late = [b for o, b in self.samples if o - self.a_min > 25]
+            ok = [b for o, b in self.samples if o - self.a_min <= 10]
+            if late and ok:
+                text += (f" | late pieces {len(late)}: video before them avg {sum(late) / len(late) / 1000:.0f} KB"
+                         f" vs on-time {sum(ok) / len(ok) / 1000:.0f} KB")
+        self.t0 = time.perf_counter()
+        self._reset()
+        return text
+
+
+# --------------------------------------------------------------------------
+class AudioChannel(threading.Thread):
+    """Second USB connection for SOUND ONLY (iPhone port 2346). Sound then
+    never waits behind big video frames. With an older iPhone app the port is
+    closed and sound keeps coming on the main connection."""
+    RETRY_S = 2.0
+
+    def __init__(self, receiver):
+        super().__init__(daemon=True, name="audio-channel")
+        self.rx = receiver
+        self.s = receiver.s
+
+    def run(self):
+        while self.s.running:
+            if self.s.state != ST_CONNECTED:
+                time.sleep(0.3)
+                continue
+            try:
+                sock = self.rx.open_socket(AUDIO_PORT)
+            except Exception:
+                time.sleep(self.RETRY_S)      # older iPhone app: no sound-only channel
+                continue
+            print(f"[audio] {time.strftime('%H:%M:%S')} sound-only USB channel connected", flush=True)
+            self.s.audio_channel = "separate"
+            try:
+                self.stream(sock)
+            except Exception as e:
+                print(f"[audio] sound channel ended: {type(e).__name__}: {e}", flush=True)
+            finally:
+                self.s.audio_channel = "main"
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            time.sleep(0.3)
+
+    def stream(self, sock):
+        sock.setblocking(True)
+        sock.settimeout(SOCKET_TIMEOUT_S)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        while self.s.running and self.s.state == ST_CONNECTED:
+            ptype, flags, ts_us, length = HEADER.unpack(Receiver.recv_exact(sock, HEADER.size))
+            if length > MAX_PAYLOAD:
+                raise ValueError(f"bad packet length {length}")
+            payload = Receiver.recv_exact(sock, length) if length else b""
+            self.s.bytes_total += HEADER.size + length
+            if ptype == T_AUDIO_PCM:
+                self.rx.handle_audio(ts_us, bytes(payload))
+
+
+# --------------------------------------------------------------------------
 class Receiver(threading.Thread):
     def __init__(self, shared: Shared, tcp_address=None):
         super().__init__(daemon=True, name="receiver")
         self.s = shared
         self.tcp_address = tcp_address
         self.view = FrameRenderer("bgra")       # for the window
+        self.sync = SyncMeter()
         self.video = VideoWorker(self)
         self.video.start()
+        self.audio_channel = AudioChannel(self)
+        self.audio_channel.start()
 
     # ---- connection -------------------------------------------------------
-    async def _usb_connect(self):
+    @staticmethod
+    async def _usb_connect(port):
         devices = await usbmux.list_devices()
         usb = [d for d in devices if d.is_usb]
         if not usb:
             raise NoDeviceError()
-        return await usb[0].connect(DEVICE_PORT)
+        return await usb[0].connect(port)
 
-    def open_socket(self):
+    def open_socket(self, port=DEVICE_PORT):
         if self.tcp_address:
-            host, port = self.tcp_address
-            return socket.create_connection((host, port), timeout=2)
+            host, base = self.tcp_address
+            return socket.create_connection((host, base + (port - DEVICE_PORT)), timeout=2)
         # Selector loop: keeps the socket free of Windows IOCP so we can use
         # it as a normal blocking socket afterwards.
-        return asyncio.run(self._usb_connect(), loop_factory=asyncio.SelectorEventLoop)
+        return asyncio.run(self._usb_connect(port), loop_factory=asyncio.SelectorEventLoop)
 
     def run(self):
         while self.s.running:
@@ -348,6 +470,7 @@ class Receiver(threading.Thread):
 
         self.video.reset()               # fresh decoder for each connection
         config = b""                     # Annex-B SPS+PPS
+        sync = self.sync = SyncMeter()
 
         while self.s.running:
             ptype, flags, ts_us, length = HEADER.unpack(self.recv_exact(sock, HEADER.size))
@@ -365,6 +488,7 @@ class Receiver(threading.Thread):
                         print(f"[mirror] {time.strftime('%H:%M:%S')} stream: {self.s.codec}, {w}x{h}", flush=True)
                     config = new_config
             elif ptype == T_VIDEO_FRAME:
+                self.sync.video(ts_us, length)
                 is_key = bool(flags & FLAG_KEYFRAME)
                 data = (config + bytes(payload)) if is_key else bytes(payload)
                 self.video.submit(data, is_key, ts_us)
@@ -372,18 +496,26 @@ class Receiver(threading.Thread):
                 if length >= 1:
                     self.s.orientation = payload[0]
             elif ptype == T_AUDIO_PCM:
-                self.s.last_audio_ts = ts_us
-                pcm = bytes(payload)
-                if self.s.audio is not None:
-                    self.s.audio.feed(ts_us, pcm)
-                rec = self.s.recorder
-                if rec is not None and rec.active:
-                    rec.audio(ts_us, pcm)
+                self.handle_audio(ts_us, bytes(payload))
             elif ptype == T_INFO:
                 text = bytes(payload).decode("utf-8", "replace")
                 self.s.info = text
                 print(f"[iphone] {time.strftime('%H:%M:%S')} {text}", flush=True)
             # T_HEARTBEAT: nothing to do (it just keeps the timeout from firing)
+            report = self.sync.report()
+            if report:
+                self.s.sync_text = report
+                print(f"[sync] {time.strftime('%H:%M:%S')} {report}", flush=True)
+
+    def handle_audio(self, ts_us, pcm):
+        """Sound from either channel: play at once + record."""
+        self.sync.audio(ts_us, len(pcm))
+        self.s.last_audio_ts = ts_us
+        if self.s.audio is not None:
+            self.s.audio.feed(ts_us, pcm)
+        rec = self.s.recorder
+        if rec is not None and rec.active:
+            rec.audio(ts_us, pcm)
 
     # ---- output -----------------------------------------------------------
     def present(self, frame, k):

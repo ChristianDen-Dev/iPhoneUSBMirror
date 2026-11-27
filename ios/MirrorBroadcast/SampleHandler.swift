@@ -5,11 +5,17 @@
 import ReplayKit
 import CoreMedia
 import CoreVideo
+import QuartzCore
 
 class SampleHandler: RPBroadcastSampleHandler {
     static let port: UInt16 = 2345
+    /// Sound-only channel: its own TCP connection, so sound never waits behind
+    /// big video frames (lower, steadier audio delay). Older receivers don't
+    /// connect here and keep getting sound on the main port.
+    static let audioPort: UInt16 = 2346
 
     private let server = MirrorServer(port: SampleHandler.port)
+    private let audioServer = MirrorServer(port: SampleHandler.audioPort)
     private let audio = AppAudioConverter()
     private var encoder: VideoEncoder?
 
@@ -19,6 +25,12 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var sourceDescription = "none" // last ReplayKit buffer size/format (diagnostics)
     private var encoderDescription = "none"
     private var tickCount = 0
+
+    // audio delivery diagnostics (how evenly ReplayKit hands us sound)
+    private let audioStatsLock = NSLock()
+    private var lastAudioArrival: CFTimeInterval = 0
+    private var audioMaxGapMs: Double = 0
+    private var audioPieces = 0
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         server.onClientConnected = { [weak self] in
@@ -33,6 +45,7 @@ class SampleHandler: RPBroadcastSampleHandler {
             if self.tickCount % 5 == 1 { self.sendInfo() }   // every ~5 s
         }
         server.start()
+        audioServer.start()
     }
 
     override func broadcastPaused() {}
@@ -40,6 +53,7 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     override func broadcastFinished() {
         server.stop()
+        audioServer.stop()
         encoder?.invalidate()
         encoder = nil
     }
@@ -116,17 +130,32 @@ class SampleHandler: RPBroadcastSampleHandler {
         case .critical: thermal = "CRITICAL"
         @unknown default: thermal = "?"
         }
-        let text = String(format: "source %@ -> encode %@ | orient %d | mem %.1f MB | thermal %@ | lowPower %@",
+        audioStatsLock.lock()
+        let pieces = audioPieces, maxGap = audioMaxGapMs
+        audioPieces = 0; audioMaxGapMs = 0
+        audioStatsLock.unlock()
+        let text = String(format: "source %@ -> encode %@ | orient %d | mem %.1f MB | thermal %@ | lowPower %@"
+                          + " | audio in %d pieces, max gap %.0f ms, channel %@",
                           src, enc, Int(orient), memoryFootprintMB(), thermal,
-                          ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off")
+                          ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off",
+                          pieces, maxGap, audioServer.isClientConnected ? "separate" : "main")
         server.send(Packet.make(.info, timestampUs: 0, payload: Data(text.utf8)), isVideo: false)
     }
 
     // MARK: audio
 
     private func handleAudio(_ sb: CMSampleBuffer) {
-        guard server.isClientConnected, let pcm = audio.convert(sb) else { return }
+        let now = CACurrentMediaTime()
+        audioStatsLock.lock()
+        if lastAudioArrival > 0 { audioMaxGapMs = max(audioMaxGapMs, (now - lastAudioArrival) * 1000) }
+        lastAudioArrival = now
+        audioPieces += 1
+        audioStatsLock.unlock()
+
+        // Prefer the sound-only channel; fall back to the main one.
+        let target = audioServer.isClientConnected ? audioServer : server
+        guard target.isClientConnected, let pcm = audio.convert(sb) else { return }
         let ts = microseconds(CMSampleBufferGetPresentationTimeStamp(sb))
-        server.send(Packet.make(.audioPCM, timestampUs: ts, payload: pcm), isVideo: false)
+        target.send(Packet.make(.audioPCM, timestampUs: ts, payload: pcm), isVideo: false)
     }
 }

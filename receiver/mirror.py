@@ -642,7 +642,8 @@ class App:
             f"video {vw}x{vh}  orient {s.orientation}  window {area.width}x{area.height}",
             f"decode[{s.decoder_name}] {s.decode_ms:4.1f} ms  draw {s.render_ms:4.1f} ms  window {s.window_ms:4.1f} ms",
             f"late frames skipped {s.frames_skipped}",
-            f"audio {a.device_name}",
+            f"audio {a.device_name}  channel: {s.audio_channel}",
+            f"sync: {s.sync_text or '-'}",
             f"audio buffer {a.buffered_ms:3.0f}/{a.target_ms} ms  underruns {a.underruns}  skips {a.skips}  "
             f"speed fixes {a.corrections}",
             f"iPhone: {s.info or '-'}",

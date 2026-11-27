@@ -35,6 +35,7 @@ ICONS = {
     "rec": "\ue7c8", "stop": "\ue71a", "flip": "\ue7ad", "pin": "\ue718", "unpin": "\ue77a",
     "vol": "\ue767", "mute": "\ue74f", "stats": "\ue9d9", "folder": "\ued25", "help": "\ue897",
     "menu": "\ue713", "info": "\ue946", "mic": "\ue720", "micoff": "\uf781",
+    "back": "\ue72b", "home": "\ue80f", "apps": "\ue7c4", "wifi": "\ue701",
 }
 
 

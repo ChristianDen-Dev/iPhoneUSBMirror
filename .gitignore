@@ -37,3 +37,7 @@ desktop.ini
 
 # ---- Receiver local settings ----
 receiver/settings.json
+
+# ---- Android tools (downloaded by tools/get_android_tools.py / make_portable.py) ----
+receiver/vendor/
+dist/

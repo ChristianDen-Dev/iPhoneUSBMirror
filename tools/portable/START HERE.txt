@@ -1,0 +1,85 @@
+iPhone USB Mirror - portable package
+====================================
+Mirrors an iPhone OR an Android phone to this Windows PC, by USB cable or by
+Wi-Fi, with game sound, for OBS / TikTok LIVE Studio. No time limit, no
+watermark. Nothing to install for the mirror itself.
+
+
+WHAT IS IN THIS FOLDER
+  Start Mirror.bat      double-click to start the mirror
+  app\                  the mirror program
+  python\               its own Python (does not touch the PC)
+  installers\           things some PCs need (see below)
+
+
+FIRST TIME ON A NEW PC (about 5 minutes)
+  1. Unzip this folder somewhere simple, for example C:\iPhoneUSBMirror
+     (not inside a Google Drive / OneDrive sync folder).
+  2. Sound for the stream (OBS / TikTok): install VB-Audio Virtual Cable
+       installers\VBCABLE_Driver_Pack46.zip -> unzip -> right-click
+       VBCABLE_Setup_x64.exe -> Run as administrator -> Install Driver -> restart the PC.
+     (Skip this if you only want to watch, not stream.)
+  3. iPhone by USB only: install "Apple Devices" from the Microsoft Store
+     (or iTunes from apple.com). Not needed for iPhone over Wi-Fi or for Android.
+  4. Double-click  Start Mirror.bat .
+     If Windows says "Windows protected your PC": More info -> Run anyway.
+     If the Firewall asks about python or adb: Cancel is fine (not needed).
+
+
+IPHONE
+  The "USB Mirror" app must be on the iPhone (installed with Sideloadly).
+  USB : plug in, unlock, tap Trust if asked.
+  Wi-Fi: iPhone and PC on the SAME Wi-Fi (5 GHz is best), or connect the PC
+         to the iPhone's Personal Hotspot. The first time, the iPhone asks
+         "find devices on your local network" -> Allow.
+  Then: open USB Mirror on the iPhone -> round button -> iPhone USB Mirror
+        -> Start Broadcast. The picture appears by itself (W = search Wi-Fi now).
+  USB has the lowest delay. If you plug the cable in while on Wi-Fi, the
+  mirror switches to USB by itself.
+
+  Free Apple ID: the app stops opening after 7 days. Re-install it:
+    1. Stop the broadcast on the iPhone.
+    2. Install Sideloadly (installers\SideloadlySetup64.exe) - only once per PC;
+       Sideloadly needs Apple Devices / iTunes (step 3 above).
+    3. Plug in the iPhone, drag installers\iPhoneUSBMirror.ipa into Sideloadly,
+       type YOUR Apple ID, Start. Type the password yourself in Sideloadly only.
+    4. iPhone: Settings > General > VPN & Device Management > trust your Apple ID.
+
+
+ANDROID (no app to install on the phone)
+  One time on the phone:
+    Settings > About phone > tap "Build number" 7 times (Developer options ON)
+    Settings > Developer options > USB debugging ON
+  USB : plug in -> on the phone tap "Allow USB debugging"
+        (tick "Always allow from this computer").
+  Wi-Fi: first connect by USB, then right-click the mirror -> "Android: switch
+         to Wi-Fi", then unplug. (Again after each phone restart.)
+  The mouse works as your finger. Backspace = Back, Home = Home, End = Recent apps.
+  Sound needs Android 11 or newer. By default the phone speaker is silent while
+  mirroring; right-click -> "Android: keep game sound on the phone too" (Android 13+).
+  If the phone is not found by USB: try another cable/port, set USB mode to
+  "File transfer", or install the phone maker's USB driver.
+
+
+OBS / TIKTOK LIVE STUDIO
+  Picture : Window Capture -> "[python.exe]: iPhone USB Mirror" (Capture Audio OFF).
+            Press F2 in the mirror for Stream Mode (clean picture, exact size).
+  Sound   : Desktop Audio = CABLE Input (VB-Audio Virtual Cable). Mic/Aux = Disabled.
+            The mirror already mixes game sound + your mic into the cable.
+  M mutes only the PC speakers - the stream keeps the sound.
+  V chooses the stream mic (Auto / Laptop / iPhone / none).
+
+
+KEYS
+  F2 Stream Mode   F11 fullscreen   F12 screenshot   F9 record   M laptop sound
+  A sound panel    V stream mic     N mute mic       W find iPhone on Wi-Fi
+  H all keys       Right-click = all options
+
+
+PROBLEMS
+  - Black window, "Waiting for a phone": start the broadcast (iPhone) /
+    tap Allow (Android). For Wi-Fi press W.
+  - iPhone by USB not found: install Apple Devices (step 3), unplug/replug, unlock.
+  - Stutters on Wi-Fi: use 5 GHz Wi-Fi or the iPhone Hotspot, or use the USB cable.
+  - Smart App Control blocks a file: Windows Security > App & browser control.
+  - No sound in OBS: Desktop Audio must be CABLE Input; press A in the mirror.

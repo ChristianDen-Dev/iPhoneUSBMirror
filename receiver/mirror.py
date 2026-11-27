@@ -54,6 +54,10 @@ DEFAULTS = {
     "mic_gain": 100,                 # mic loudness in the stream, %
     "window_w": 1280,
     "window_h": 800,
+    "wifi_search": True,             # also look for phones on Wi-Fi (no cable)
+    "wifi_hosts": [],                # iPhone Wi-Fi IPs that worked before
+    "android_hosts": [],             # Android phones switched to Wi-Fi before
+    "android_keep_sound": False,     # Android 13+: game sound also stays on the phone
 }
 
 HELP_ROWS = [
@@ -72,6 +76,9 @@ HELP_ROWS = [
     ("S", "Sharpen when the picture is enlarged"),
     ("F1", "Statistics"),
     ("O", "Open recordings folder"),
+    ("W", "Find the iPhone on Wi-Fi now"),
+    ("Click / drag", "Android: tap / swipe on the phone"),
+    ("Backspace / Home / End", "Android: Back / Home / Recent apps"),
     ("Right-click", "All options"),
 ]
 
@@ -132,6 +139,10 @@ class App:
         s = self.s = Shared()
         s.flip_landscape = self.cfg["flip_landscape"]
         s.sharpen = self.cfg["sharpen"]
+        s.wifi_search = self.cfg["wifi_search"]
+        s.wifi_hosts = list(self.cfg["wifi_hosts"])
+        s.android_hosts = list(self.cfg["android_hosts"])
+        s.android_keep_sound = self.cfg["android_keep_sound"]
         fix_default_speaker()
         self.router = s.audio = AudioRouter(self.cfg["stream_output"])
         self.audio = self.router.laptop          # what you hear on the laptop
@@ -172,6 +183,8 @@ class App:
         self.cursor_visible = True
         self.overlay_visible = False     # fullscreen toolbar
         self.last_click = (0.0, (0, 0))
+        self.video_rect = None           # where the picture is drawn (for Android touches)
+        self.touching = False            # left button held on an Android picture
         self.toasts = []                 # [(text, color, start)]
         self.messages = collections.deque()   # toasts from other threads
         self.current = None              # (surface, numpy array kept alive)
@@ -378,6 +391,37 @@ class App:
             self.save()
             if self.mode == "stream":
                 self.set_window()
+        elif key in ("aback", "ahome", "aapps"):
+            ctl = s.control
+            if ctl is None:
+                self.toast("Only for Android phones", AMBER)
+            else:
+                import android
+                ctl.key({"aback": android.KEY_BACK, "ahome": android.KEY_HOME,
+                         "aapps": android.KEY_APP_SWITCH}[key])
+        elif key == "wifi_scan":
+            if not s.wifi_search:
+                s.wifi_search = self.cfg["wifi_search"] = True
+                self.save()
+            self.receiver.wifi.scan_now.set()
+            self.toast("Looking for the iPhone on Wi-Fi...  (start the broadcast on the iPhone)", ACCENT)
+        elif key == "wifi_toggle":
+            s.wifi_search = self.cfg["wifi_search"] = not s.wifi_search
+            self.save()
+            self.toast(f"Wi-Fi mirroring {'on' if s.wifi_search else 'off (USB only)'}")
+        elif key == "android_wifi":
+            self.receiver.android_to_wifi()
+        elif key == "android_sound":
+            s.android_keep_sound = self.cfg["android_keep_sound"] = not s.android_keep_sound
+            self.save()
+            self.toast("Android sound: " + ("laptop + phone (Android 13+)" if s.android_keep_sound
+                                            else "laptop only (phone speaker silent)"))
+            self.receiver.android_restart()
+        elif key == "forget":
+            s.wifi_hosts, s.android_hosts = [], []
+            self.cfg["wifi_hosts"], self.cfg["android_hosts"] = [], []
+            self.save()
+            self.toast("Saved Wi-Fi phones forgotten")
         elif key == "menu":
             self.show_menu()
         elif key == "quit":
@@ -416,6 +460,14 @@ class App:
             ("vol+", f"Laptop volume up  ({self.cfg['volume']} %)\tUp", False, self.cfg["volume"] < 150),
             ("vol-", "Laptop volume down\tDown", False, self.cfg["volume"] > 0),
             None,
+            ("wifi_scan", "Find iPhone on Wi-Fi now\tW", False, True),
+            ("wifi_toggle", "Wi-Fi mirroring (look for phones on Wi-Fi)", self.s.wifi_search, True),
+            ("android_wifi", "Android: switch to Wi-Fi (then unplug the cable)", False,
+             self.s.device_kind == "Android" and self.s.link_name == "USB"),
+            ("android_sound", "Android: keep game sound on the phone too (Android 13+)",
+             self.s.android_keep_sound, True),
+            ("forget", "Forget saved Wi-Fi phones", False, bool(self.s.wifi_hosts or self.s.android_hosts)),
+            None,
             ("pin", "Always on top\tT", self.cfg["always_on_top"], True),
             ("flip", "Flip landscape 180°\tR", self.s.flip_landscape, True),
             ("sharpen", "Sharpen when enlarged\tS", self.s.sharpen, True),
@@ -448,7 +500,20 @@ class App:
         pygame.K_PLUS: "vol+", pygame.K_KP_PLUS: "vol+", pygame.K_MINUS: "vol-", pygame.K_KP_MINUS: "vol-",
         pygame.K_t: "pin", pygame.K_r: "flip", pygame.K_s: "sharpen", pygame.K_F1: "stats",
         pygame.K_o: "folder", pygame.K_h: "help", pygame.K_a: "sound", pygame.K_n: "micmute", pygame.K_v: "micsrc",
+        pygame.K_w: "wifi_scan", pygame.K_BACKSPACE: "aback", pygame.K_HOME: "ahome", pygame.K_END: "aapps",
     }
+
+    def touch(self, action, pos):
+        """Window position -> finger on the Android phone."""
+        ctl, r = self.s.control, self.video_rect
+        if ctl is None or r is None or not ctl.screen[0]:
+            return False
+        w, h = ctl.screen
+        ctl.touch(action, (pos[0] - r.left) * w / max(1, r.width), (pos[1] - r.top) * h / max(1, r.height))
+        return True
+
+    def on_video(self, pos):
+        return self.s.control is not None and self.video_rect is not None and self.video_rect.collidepoint(pos)
 
     def hit(self, pos):
         if self.slider_rect and self.slider_rect.collidepoint(pos):
@@ -484,10 +549,17 @@ class App:
                     self.cursor_visible = True
                 if self.dragging:
                     self.slider_set(e.pos[0])
+                if self.touching:
+                    import android
+                    self.touch(android.TOUCH_MOVE, e.pos)
                 h = self.hit(e.pos)
                 if h != self.hover:
                     self.hover, self.hover_since, self.tip_shown = h, now, False
                     self.dirty = True
+            elif e.type in (pygame.WINDOWLEAVE, pygame.WINDOWFOCUSLOST) and self.touching:
+                import android
+                self.touch(android.TOUCH_UP, pygame.mouse.get_pos())
+                self.touching = False
             elif e.type == pygame.WINDOWLEAVE:
                 if self.hover:
                     self.hover = None
@@ -500,6 +572,9 @@ class App:
                 elif h:
                     self.pressed = h
                     self.dirty = True
+                elif self.on_video(e.pos):                 # Android: the mouse is a finger
+                    import android
+                    self.touching = self.touch(android.TOUCH_DOWN, e.pos)
                 elif self.mode != "stream":
                     t, p = self.last_click
                     if now - t < 0.35 and abs(e.pos[0] - p[0]) < 8 and abs(e.pos[1] - p[1]) < 8:
@@ -508,7 +583,11 @@ class App:
                     else:
                         self.last_click = (now, e.pos)
             elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
-                if self.dragging:
+                if self.touching:
+                    import android
+                    self.touch(android.TOUCH_UP, e.pos)
+                    self.touching = False
+                elif self.dragging:
                     self.dragging = False
                     self.save()
                 elif self.pressed:
@@ -568,8 +647,11 @@ class App:
         if st == ST_CONNECTED:
             return "Connected - waiting for picture", ACCENT
         if st == ST_NO_APP:
-            return "iPhone found - start the broadcast", ACCENT
-        return "Waiting for iPhone (USB)", AMBER
+            return {"iphone": ("iPhone found - start the broadcast", ACCENT),
+                    "android_unauth": ("Android found - tap Allow on the phone", AMBER),
+                    "android_error": ("Android found - could not start", RED)}.get(
+                        self.s.found, ("Phone found", ACCENT))
+        return "Waiting for a phone (USB or Wi-Fi)", AMBER
 
     def toolbar_specs(self):
         a, s, c = self.audio, self.s, self.cfg
@@ -578,6 +660,12 @@ class App:
             ("stream", "stream", "Stream Mode: clean picture for OBS / TikTok (F2)", self.stream_mode, None),
             ("full", "unfull" if self.fullscreen else "full", "Fullscreen (F11)", self.fullscreen, None),
             "sep",
+        ] + ([
+            ("aback", "back", "Android: Back (Backspace)", False, None),
+            ("ahome", "home", "Android: Home (Home key)", False, None),
+            ("aapps", "apps", "Android: Recent apps (End key)", False, None),
+            "sep",
+        ] if s.control is not None else []) + [
             ("shot", "shot", "Screenshot (F12)", False, None),
             ("rec", "stop" if rec else "rec", "Stop recording (F9)" if rec else "Record video (F9)", rec, RED),
             "sep",
@@ -789,7 +877,8 @@ class App:
         if self.live:
             vw, vh = s.video_size
             dec = "GPU decode" if s.decoder_name in ("cuda", "d3d11va") else "CPU decode"
-            left = ["USB", s.codec or "H.264", f"{vw}×{vh}", f"{self.fps:.0f} fps", f"{self.mbps:.1f} Mbps", dec]
+            left = [f"{s.device_kind} \u00b7 {s.link_name}", s.codec or "H.264", f"{vw}×{vh}",
+                    f"{self.fps:.0f} fps", f"{self.mbps:.1f} Mbps", dec]
         else:
             left = ["Not mirroring"]
         x = p.px(12)
@@ -803,7 +892,7 @@ class App:
             right.append((f"● REC {fmt_time(self.rec.elapsed)}  {self.rec.size_mb:.0f} MB", RED))
         if self.live:
             heat = s.thermal
-            if heat:
+            if heat and s.device_kind == "iPhone":
                 right.append((f"iPhone heat: {heat.capitalize()}", HEAT_COLORS.get(heat, DIM)))
             right.append((f"Audio {self.audio.buffered_ms:.0f} ms", DIM))
         rt = self.router
@@ -831,12 +920,17 @@ class App:
     def draw_waiting(self, area):
         p, scr, st = self.p, self.screen, self.s.state
         scr.fill(BG, area)
+        found = self.s.found
         steps = [
-            ("Plug the iPhone into this laptop with the USB cable and unlock it", st != ST_NO_USB),
-            ("In the iPhone USB Mirror app tap the round button → Start Broadcast", st == ST_CONNECTED),
+            ("iPhone: USB cable or same Wi-Fi  \u00b7  Android: USB cable + USB debugging ON", st != ST_NO_USB),
+            ("iPhone: USB Mirror app \u2192 round button \u2192 Start Broadcast  \u00b7  Android: tap Allow",
+             st == ST_CONNECTED),
             ("Open your game - the picture appears here", False),
         ]
-        title = {ST_NO_USB: "Connect your iPhone", ST_NO_APP: "Start the broadcast"}.get(st, "Almost there...")
+        title = {"iphone": "Start the broadcast", "android_unauth": "Tap Allow on the Android phone",
+                 "android_error": "Android phone found - could not start"}.get(found, "Connect your phone")
+        if st == ST_CONNECTED:
+            title = "Almost there..."
         cw = min(p.px(600), area.width - p.px(32))
         ch = p.px(300)
         card = pygame.Rect(0, 0, cw, ch)
@@ -863,6 +957,12 @@ class App:
             y += p.px(44)
         y += p.px(6)
         tip = "Tip: keep AssistiveTouch ON for a sharp game picture (Settings › Accessibility › Touch)"
+        if found == "android_error" and self.s.hint:
+            tip = "Problem: " + self.s.hint
+        elif found == "android_unauth":
+            tip = "On the phone: tick 'Always allow from this computer' \u2192 Allow"
+        elif not found and st == ST_NO_USB and self.s.wifi_search:
+            tip = "Wi-Fi: phone and laptop on the same Wi-Fi, start the broadcast, press W to search"
         t = p.text(p.f_small, tip, DIM)
         if t.get_width() < card.width - p.px(56):
             scr.blit(t, (card.left + p.px(28), y))
@@ -971,8 +1071,11 @@ class App:
                 sw, sh = surf.get_size()
             if (sw, sh) != area.size:
                 scr.fill((0, 0, 0), area)                 # black bars only when needed
-            scr.blit(surf, (area.left + (area.width - sw) // 2, area.top + (area.height - sh) // 2))
+            self.video_rect = pygame.Rect(area.left + (area.width - sw) // 2, area.top + (area.height - sh) // 2,
+                                          sw, sh)
+            scr.blit(surf, self.video_rect.topleft)
         else:
+            self.video_rect = None
             self.draw_waiting(area)
         if toolbar:
             self.draw_toolbar(toolbar)
@@ -1020,6 +1123,13 @@ class App:
             self.handle_events()
             while self.messages:
                 self.toast(*self.messages.popleft())
+            while s.notices:
+                text, kind = s.notices.popleft()
+                self.toast(text, {"good": GREEN, "warn": AMBER}.get(kind, ACCENT), force=True)
+            if s.hosts_changed:
+                s.hosts_changed = False
+                self.cfg["wifi_hosts"], self.cfg["android_hosts"] = list(s.wifi_hosts), list(s.android_hosts)
+                self.save()
 
             # Stream Mode follows the iPhone picture size (portrait <-> landscape)
             if self.mode == "stream" and self.stream_window_size() != self.stream_size:
@@ -1068,7 +1178,7 @@ class App:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="iPhone USB Mirror receiver")
+    parser = argparse.ArgumentParser(description="iPhone USB Mirror receiver (iPhone + Android, USB + Wi-Fi)")
     parser.add_argument("--tcp", help="debug: connect to HOST:PORT instead of usbmux")
     args = parser.parse_args()
     tcp_address = None

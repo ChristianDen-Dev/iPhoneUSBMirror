@@ -1,8 +1,12 @@
 """
 core.py - the "engine" of the receiver (no window code here):
 
-  Receiver thread : connects to the iPhone over USB (usbmux, port 2345),
+  Receiver thread : finds a phone and streams from it, in this order:
+                      1. iPhone over USB  (usbmux, port 2345)
+                      2. Android over USB or Wi-Fi (adb + scrcpy-server, android.py)
+                      3. iPhone over Wi-Fi (TCP to the iPhone's IP, port 2345)
                     reads packets, plays audio at once, hands video on.
+  WiFiFinder      : looks for the iPhone app on the local network.
   VideoWorker     : decodes H.264 on the GPU (CPU fallback), always shows
                     the NEWEST frame (never builds a delay), feeds the
                     recorder and takes screenshots.
@@ -13,8 +17,10 @@ Protocol: see docs/PROTOCOL.md
 
 import asyncio
 import collections
+import ipaddress
 import os
 import re
+import select
 import socket
 import struct
 import threading
@@ -25,6 +31,8 @@ import av
 from av.codec.hwaccel import HWAccel
 import numpy as np
 from pymobiledevice3 import usbmux
+
+import android
 
 DEVICE_PORT = 2345
 AUDIO_PORT = 2346               # sound-only channel (newer iPhone app); falls back to the main one
@@ -88,6 +96,20 @@ class Shared:
         self.info = ""               # last diagnostic text from the iPhone
         self.sync_text = ""          # last audio timing report (SyncMeter)
         self.audio_channel = "main"  # "separate" when the sound-only channel is connected
+        # which phone / link (shown in the window)
+        self.device_kind = ""        # "iPhone" / "Android"
+        self.device_name = ""
+        self.link_name = ""          # "USB" / "Wi-Fi"
+        self.found = ""              # waiting screen hint: "iphone" / "android_unauth" / "android_error"
+        self.hint = ""               # extra text for the hint
+        self.control = None          # android.AndroidControl while an Android phone is connected
+        self.notices = collections.deque()   # (text, kind) messages for the window
+        # Wi-Fi settings (the window loads/saves them)
+        self.wifi_search = True      # look for the iPhone on Wi-Fi when nothing is connected
+        self.wifi_hosts = []         # iPhone IPs that worked before (newest first)
+        self.android_hosts = []      # Android IPs switched to Wi-Fi before
+        self.android_keep_sound = False   # Android 13+: sound also stays on the phone
+        self.hosts_changed = False
         self.bytes_total = 0
         self.frames_in = 0           # decoded frames (= what the iPhone sends)
         self.frames_decoded = 0      # frames prepared for the window
@@ -114,6 +136,15 @@ class Shared:
         """iPhone heat level from the INFO text: nominal / fair / serious / critical."""
         m = re.search(r"thermal (\w+)", self.info or "")
         return m.group(1).lower() if m else ""
+
+    def remember(self, attr, host):
+        hosts = [h for h in getattr(self, attr) if h != host]
+        setattr(self, attr, ([host] + hosts)[:4])
+        self.hosts_changed = True
+
+    def notice(self, text, kind="info"):
+        self.notices.append((text, kind))
+        print(f"[link] {time.strftime('%H:%M:%S')} {text}", flush=True)
 
     def clear_frame(self):
         with self.lock:
@@ -350,7 +381,7 @@ class AudioChannel(threading.Thread):
             print("[audio] sound-only channel disabled (MIRROR_AUDIO_CHANNEL=0)", flush=True)
             return
         while self.s.running:
-            if self.s.state != ST_CONNECTED:
+            if self.s.state != ST_CONNECTED or self.s.device_kind != "iPhone":
                 time.sleep(0.3)
                 continue
             try:
@@ -358,7 +389,7 @@ class AudioChannel(threading.Thread):
             except Exception:
                 time.sleep(self.RETRY_S)      # older iPhone app: no sound-only channel
                 continue
-            print(f"[audio] {time.strftime('%H:%M:%S')} sound-only USB channel connected", flush=True)
+            print(f"[audio] {time.strftime('%H:%M:%S')} sound-only channel connected ({self.s.link_name})", flush=True)
             self.s.audio_channel = "separate"
             try:
                 self.stream(sock)
@@ -389,67 +420,356 @@ class AudioChannel(threading.Thread):
 
 
 # --------------------------------------------------------------------------
+class WiFiFinder(threading.Thread):
+    """Finds the iPhone app on the local network while nothing is connected:
+    remembered IPs, the iPhone Hotspot address, and a quick scan of the
+    laptop's own /24 network(s) for port 2345."""
+    SCAN_EVERY_S = 15
+    HOTSPOT_IPHONE = "172.20.10.1"      # the iPhone itself when the laptop uses its Hotspot
+
+    def __init__(self, shared):
+        super().__init__(daemon=True, name="wifi-finder")
+        self.s = shared
+        self.found = []
+        self.scan_now = threading.Event()
+
+    @staticmethod
+    def local_ipv4s():
+        ips = set()
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ips.add(info[4][0])
+        except OSError:
+            pass
+        try:                                     # address of the default route (sends nothing)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
+                u.connect(("10.255.255.255", 1))
+                ips.add(u.getsockname()[0])
+        except OSError:
+            pass
+        out = []
+        for ip in ips:
+            a = ipaddress.ip_address(ip)
+            if a.is_private and not a.is_loopback and not a.is_link_local:
+                out.append(ip)
+        return out
+
+    def candidates(self):
+        hosts = list(self.s.wifi_hosts) + list(self.found)
+        if any(ip.startswith("172.20.10.") for ip in self.local_ipv4s()):
+            hosts.insert(0, self.HOTSPOT_IPHONE)
+        seen, out = set(), []
+        for h in hosts:
+            if h not in seen:
+                seen.add(h)
+                out.append(h)
+        return out[:6]
+
+    def scan(self):
+        """Non-blocking connect to x.x.x.1-254:2345 on each local /24 (~1 s)."""
+        mine = self.local_ipv4s()
+        nets = sorted({ip.rsplit(".", 1)[0] for ip in mine})[:4]
+        hits = []
+        for net in nets:
+            socks = {}
+            for i in range(1, 255):
+                ip = f"{net}.{i}"
+                if ip in mine:
+                    continue
+                so = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                so.setblocking(False)
+                try:
+                    so.connect_ex((ip, DEVICE_PORT))
+                    socks[so] = ip
+                except OSError:
+                    so.close()
+            deadline = time.monotonic() + 0.9
+            pending = set(socks)
+            while pending and time.monotonic() < deadline:
+                _, w, x = select.select([], list(pending), list(pending), max(0.0, deadline - time.monotonic()))
+                for so in w:
+                    if so.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0:
+                        hits.append(socks[so])
+                for so in set(w) | set(x):
+                    pending.discard(so)
+            for so in socks:
+                so.close()
+        return hits
+
+    def run(self):
+        while self.s.running:
+            if self.s.wifi_search and self.s.state != ST_CONNECTED:
+                try:
+                    hits = self.scan()
+                except Exception as e:
+                    print(f"[wifi] scan failed: {e}", flush=True)
+                    hits = []
+                new = [h for h in hits if h not in self.found]
+                if new:
+                    print(f"[wifi] {time.strftime('%H:%M:%S')} iPhone app answers at {', '.join(new)}", flush=True)
+                self.found = hits
+            self.scan_now.wait(self.SCAN_EVERY_S)
+            self.scan_now.clear()
+
+
+# --------------------------------------------------------------------------
 class Receiver(threading.Thread):
     def __init__(self, shared: Shared, tcp_address=None):
         super().__init__(daemon=True, name="receiver")
         self.s = shared
         self.tcp_address = tcp_address
+        self.link = ("usb",)                    # ("usb",) or ("wifi", host, base_port)
         self.view = FrameRenderer("bgra")       # for the window
         self.sync = SyncMeter()
         self.video = VideoWorker(self)
         self.video.start()
         self.audio_channel = AudioChannel(self)
         self.audio_channel.start()
+        self.wifi = WiFiFinder(shared)
+        self.wifi.start()
+        self.android_ok = android.available()
+        self.android_session = None
+        self._android_retry_at = 0.0
+        self._handoff = None                    # USB socket found while streaming over Wi-Fi
+        self._sock = None
+        if not self.android_ok:
+            print("[android] adb / scrcpy-server not found in vendor/android - Android support off", flush=True)
 
     # ---- connection -------------------------------------------------------
     @staticmethod
     async def _usb_connect(port):
-        devices = await usbmux.list_devices()
+        try:
+            devices = await usbmux.list_devices()
+        except Exception:                       # Apple Devices / iTunes not installed or not running
+            raise NoDeviceError()
         usb = [d for d in devices if d.is_usb]
         if not usb:
             raise NoDeviceError()
         return await usb[0].connect(port)
 
-    def open_socket(self, port=DEVICE_PORT):
-        if self.tcp_address:
-            host, base = self.tcp_address
-            return socket.create_connection((host, base + (port - DEVICE_PORT)), timeout=2)
+    def usb_socket(self, port=DEVICE_PORT):
         # Selector loop: keeps the socket free of Windows IOCP so we can use
         # it as a normal blocking socket afterwards.
         return asyncio.run(self._usb_connect(port), loop_factory=asyncio.SelectorEventLoop)
 
+    def open_socket(self, port=DEVICE_PORT):
+        """Socket to the iPhone app over the CURRENT link (USB or Wi-Fi)."""
+        if self.link[0] == "wifi":
+            host, base = self.link[1], self.link[2]
+            return socket.create_connection((host, base + (port - DEVICE_PORT)), timeout=2)
+        return self.usb_socket(port)
+
+    def try_iphone_wifi(self):
+        if self.tcp_address:                    # debug: --tcp HOST:PORT
+            host, base = self.tcp_address
+            try:
+                sock = socket.create_connection((host, base), timeout=2)
+            except OSError:
+                return None
+            self.link = ("wifi", host, base)
+            return sock
+        if not self.s.wifi_search:
+            return None
+        for host in self.wifi.candidates():
+            try:
+                sock = socket.create_connection((host, DEVICE_PORT), timeout=0.6)
+            except OSError:
+                continue
+            self.link = ("wifi", host, DEVICE_PORT)
+            return sock
+        return None
+
     def run(self):
         while self.s.running:
-            try:
-                sock = self.open_socket()
-            except NoDeviceError:
-                self.s.state = ST_NO_USB
-                time.sleep(1.0)
-                continue
-            except Exception:
-                self.s.state = ST_NO_APP
-                time.sleep(1.0)
-                continue
-
-            self.s.state = ST_CONNECTED
-            self.s.connected_since = time.monotonic()
-            print(f"[mirror] {time.strftime('%H:%M:%S')} connected to iPhone", flush=True)
-            try:
-                self.stream(sock)
-            except Exception as e:  # disconnect, timeout, protocol error
-                print(f"[mirror] {time.strftime('%H:%M:%S')} stream ended: {type(e).__name__}: {e}", flush=True)
-            finally:
+            sock, iphone_on_usb = self._handoff, False
+            self._handoff = None
+            if sock is not None:
+                self.link = ("usb",)
+            elif not self.tcp_address:
                 try:
-                    sock.close()
-                except OSError:
+                    sock = self.usb_socket()
+                    self.link = ("usb",)
+                except NoDeviceError:
                     pass
-                self.s.state = ST_NO_APP
-                self.video.reset()
-                self.s.clear_frame()
-                self.s.codec = ""
-                if self.s.audio is not None:
-                    self.s.audio.reset()
+                except Exception:
+                    iphone_on_usb = True        # iPhone plugged in, broadcast not started
+            if sock is None and self.android_ok and not self.tcp_address:
+                if self.try_android():
+                    continue
+            if sock is None:
+                sock = self.try_iphone_wifi()
+            if sock is None:
+                if iphone_on_usb:
+                    self.s.found = "iphone"
+                elif self.s.found == "iphone":
+                    self.s.found = ""
+                self.s.state = ST_NO_APP if self.s.found else ST_NO_USB
+                time.sleep(1.0)
+                continue
+            self.run_iphone(sock)
             time.sleep(0.3)
+
+    def run_iphone(self, sock):
+        s = self.s
+        wifi = self.link[0] == "wifi"
+        s.state = ST_CONNECTED
+        s.found, s.hint = "", ""
+        s.device_kind, s.link_name, s.device_name = "iPhone", "Wi-Fi" if wifi else "USB", "iPhone"
+        s.orientation = 1
+        s.connected_since = time.monotonic()
+        self._sock = sock
+        where = f"over Wi-Fi ({self.link[1]})" if wifi else "over USB"
+        print(f"[mirror] {time.strftime('%H:%M:%S')} connected to iPhone {where}", flush=True)
+        if wifi and not self.tcp_address:
+            s.remember("wifi_hosts", self.link[1])
+            threading.Thread(target=self._watch_usb, args=(sock,), daemon=True, name="usb-watch").start()
+        try:
+            self.stream(sock)
+        except Exception as e:  # disconnect, timeout, protocol error
+            print(f"[mirror] {time.strftime('%H:%M:%S')} stream ended: {type(e).__name__}: {e}", flush=True)
+        finally:
+            self._sock = None
+            try:
+                sock.close()
+            except OSError:
+                pass
+            self.cleanup()
+
+    def _watch_usb(self, wifi_sock):
+        """While on Wi-Fi: as soon as the iPhone is plugged in, move to USB
+        (lower delay, no Wi-Fi stutters)."""
+        while self.s.running and self._sock is wifi_sock:
+            time.sleep(2.0)
+            try:
+                usb = self.usb_socket()
+            except Exception:
+                continue
+            if self._sock is not wifi_sock:
+                usb.close()
+                return
+            self.s.notice("USB cable found - switching from Wi-Fi to USB", "good")
+            self._handoff = usb
+            try:
+                wifi_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            return
+
+    def cleanup(self):
+        s = self.s
+        s.state = ST_NO_APP if s.found else ST_NO_USB
+        s.device_kind = s.link_name = ""
+        s.control = None
+        self.video.reset()
+        s.clear_frame()
+        s.codec = ""
+        s.info = ""
+        if s.audio is not None:
+            s.audio.reset()
+
+    # ---- Android --------------------------------------------------------------
+    def try_android(self):
+        """Mirror an Android phone if one is ready. True = a session ran."""
+        devs = android.list_devices()
+        ready = [d for d, st in devs if st == "device"]
+        if not ready:
+            if any(st == "unauthorized" for _, st in devs):
+                self.s.found = "android_unauth"
+            elif self.s.found.startswith("android"):
+                self.s.found, self.s.hint = "", ""
+            now = time.monotonic()
+            if self.s.android_hosts and now >= self._android_retry_at:   # phone switched to Wi-Fi before
+                self._android_retry_at = now + 10
+                for host in list(self.s.android_hosts)[:2]:
+                    threading.Thread(target=android.connect_wifi, args=(host,), daemon=True).start()
+            return False
+        serial = sorted(ready, key=android.is_wifi_serial)[0]     # USB first
+        sess = android.AndroidSession(serial, self.s.android_keep_sound)
+        try:
+            sess.start()
+        except Exception as e:
+            print(f"[android] {time.strftime('%H:%M:%S')} could not start on {serial}: {e}", flush=True)
+            sess.stop()
+            self.s.found, self.s.hint = "android_error", str(e)[:120]
+            self.s.state = ST_NO_APP
+            time.sleep(3.0)
+            return True
+        self.run_android(sess)
+        time.sleep(0.5)
+        return True
+
+    def run_android(self, sess):
+        s = self.s
+        self.android_session = sess
+        s.state = ST_CONNECTED
+        s.found, s.hint = "", ""
+        s.device_kind, s.device_name = "Android", sess.name
+        s.link_name = "Wi-Fi" if sess.wifi else "USB"
+        s.orientation = 1                       # Android sends upright pictures
+        s.codec = "H.264"
+        s.info = f"Android {sess.name} (API {sess.sdk}) | sound {'on' if sess.audio_ok else 'off'}"
+        s.connected_since = time.monotonic()
+        self.video.reset()
+        self.sync = SyncMeter()
+        print(f"[mirror] {time.strftime('%H:%M:%S')} connected to Android {sess.name} over {s.link_name} "
+              f"({sess.serial}, API {sess.sdk}, sound {'on' if sess.audio_ok else 'off'})", flush=True)
+        if sess.audio_ok:
+            threading.Thread(target=self._android_audio, args=(sess,), daemon=True, name="android-audio").start()
+        config = b""
+        try:
+            for item in sess.read_video():
+                if not s.running:
+                    break
+                if item[0] == "size":
+                    sess.control.screen = item[1]
+                    print(f"[android] picture {item[1][0]}x{item[1][1]}", flush=True)
+                    continue
+                kind, is_key, pts, data = item
+                s.bytes_total += 12 + len(data)
+                if kind == "config":
+                    config = data
+                    s.codec = describe_sps(config)
+                    s.control = sess.control
+                    continue
+                self.sync.video(pts, len(data))
+                self.video.submit(config + data if is_key else data, is_key, pts)
+        except Exception as e:
+            print(f"[mirror] {time.strftime('%H:%M:%S')} Android stream ended: {type(e).__name__}: {e}", flush=True)
+        finally:
+            sess.stop()
+            self.android_session = None
+            self.cleanup()
+
+    def _android_audio(self, sess):
+        try:
+            for pts, pcm in sess.read_audio():
+                self.s.bytes_total += 12 + len(pcm)
+                self.handle_audio(pts, pcm)
+        except Exception:
+            pass                                # the video loop reports the end
+
+    def android_restart(self):
+        """Reconnect the Android phone (new settings take effect)."""
+        sess = self.android_session
+        if sess:
+            sess.stop()
+
+    def android_to_wifi(self):
+        """Android on USB -> also on Wi-Fi; afterwards the cable can be unplugged."""
+        sess = self.android_session
+        if not sess or sess.wifi:
+            self.s.notice("Connect the Android phone with USB first", "warn")
+            return
+
+        def work():
+            self.s.notice("Switching the Android phone to Wi-Fi...", "info")
+            ip, msg = android.enable_wifi(sess.serial)
+            if ip:
+                self.s.remember("android_hosts", ip)
+                self.s.notice(f"Android on Wi-Fi ({ip}) - you can unplug the cable now", "good")
+            else:
+                self.s.notice(f"Android Wi-Fi failed: {msg}", "warn")
+        threading.Thread(target=work, daemon=True, name="android-wifi").start()
 
     # ---- streaming --------------------------------------------------------
     @staticmethod

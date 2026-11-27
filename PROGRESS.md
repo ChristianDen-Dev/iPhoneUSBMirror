@@ -16,6 +16,9 @@ Read this first when resuming work.
 | 7 | Game audio | ✅ Works |
 | 8 | Polish + OBS | 🔧 In progress (new window, launcher done; OBS guide + 30-min test left) |
 | 9 | Documentation | — |
+| 10 | iPhone over Wi-Fi | 🔧 Code + build done (run 46065362382); waiting for real-phone test |
+| 11 | Android (USB + Wi-Fi, touch control) | 🔧 Code done; waiting for an Android phone to test |
+| 12 | Portable package (Google Drive) | ✅ Built `dist\iPhoneUSBMirror_Portable.zip` (265 MB), self-test OK |
 
 ## Phase 0 — Computer check (2026-11-27)
 - Git 2.56.0 ✅
@@ -119,8 +122,31 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - UI: toolbar level meter + mic button (when the iPhone mic is on), Sound panel (A), status bar shows stream/mic/laptop state.
 - Recordings (F9) contain game sound only (not the mic) for now.
 
+## Auto mic findings (2026-11-28)
+- Broadcast **Microphone ON** puts iOS in voice-chat mode: phone speaker gets quiet and it fights with the Mobile Legends voice mic. Recommended: Microphone **OFF** in the broadcast sheet, stream voice from the laptop mic (`mic_source` Auto falls back to the laptop mic within 0.8 s when the iPhone mic is silent / absent).
+
+## Phase 10 — iPhone over Wi-Fi (2026-11-28)
+- iOS (run 46065362382): `MirrorServer` now listens on all addresses (USB via 127.0.0.1 still works); Wi-Fi clients get **12 Mbps** (USB 20); INFO shows `link wifi|usb`; app asks for **Local Network** permission (Bonjour `_usbmirror._tcp`) and shows the iPhone's Wi-Fi / Hotspot IP.
+- Receiver: order = iPhone USB → Android → iPhone Wi-Fi. `WiFiFinder` tries remembered IPs, the Hotspot address 172.20.10.1, and a ~1 s non-blocking scan of the laptop's /24 for port 2345 (every 15 s while idle; **W** = now). While on Wi-Fi it checks USB every 2 s and **switches to USB** when the cable is plugged in. Sound-only channel 2346 follows the same link.
+- Tested with `fake_iphone.py` through the Wi-Fi code path (`--tcp`): connects, GPU decode, sound OK. Real iPhone test pending (needs the new .ipa via Sideloadly).
+- Honest limit: Wi-Fi adds ~5-30 ms and can stutter on busy 2.4 GHz; USB stays the lowest delay. Best wireless: 5 GHz router or the laptop on the iPhone Hotspot.
+
+## Phase 11 — Android (2026-11-28)
+- No phone app needed: `android.py` uses **adb + scrcpy-server v5.0.1** (Apache 2.0, from the official release, SHA-256 checked) in `receiverendorndroid` (git-ignored; `tools\make_portable.py` downloads it). We do not run scrcpy.exe — our own window/decoder/sound router/recorder are used.
+- Protocol v5 (read from the v5.0.1 source, not memory): 3 forward sockets video/audio/control; video: dummy byte, 64-byte name, codec id, 12-byte headers (MSB=1 session packet w/h; else bit62 config, bit61 key, 61-bit PTS); audio `raw` = 48 kHz s16le stereo.
+- USB 16 Mbps / Wi-Fi 8 Mbps, max 1920, 60 fps. Sound needs Android 11+. Default `audio_source=output` (phone speaker silent); menu option "keep sound on the phone" = `playback` + `audio_dup` (Android 13+, some games may block it).
+- Control: mouse = finger (touch messages, 32 bytes), Backspace/Home/End = Back/Home/Recents, toolbar buttons when Android is connected.
+- Android Wi-Fi: menu "Android: switch to Wi-Fi" (`adb tcpip 5555` + `adb connect IP`), IP remembered and reconnected automatically.
+- adb's mDNS makes Windows Firewall ask → we start adb with `ADB_MDNS=0`; adb then listens on 127.0.0.1:5037 only (checked).
+
+## Phase 12 — Portable package (2026-11-28)
+- `tools\make_portable.py` → `dist\iPhoneUSBMirror_Portable\` + `.zip` (265 MB): official embeddable Python 3.14.8 + libraries (pip --target), app, adb/scrcpy-server, installers (VB-Cable Pack46, Sideloadly, our .ipa), `Start Mirror.bat`, `START HERE.txt`.
+- Self-test imports everything with the portable Python; window opened and found VB-Cable + laptop mic when run from `dist`.
+- Other PC still needs: VB-Cable install (admin + restart) for streaming; Apple Devices app only for iPhone **USB** (Wi-Fi and Android need nothing).
+
 ## Next
-- Phase 8b: OBS / TikTok LIVE Studio capture guide, 30-min stability test.
+- Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
+- Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.
 - Phase 9: docs.
 
 ## Problems / notes

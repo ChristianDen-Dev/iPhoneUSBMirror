@@ -38,7 +38,7 @@ SCRCPY_SHA256 = "b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a
 SIDELOADLY_URL = "https://sideloadly.io/SideloadlySetup64.exe"
 
 APP_FILES = ["mirror.py", "core.py", "android.py", "audio_player.py", "recorder.py", "ui.py", "winutil.py",
-             "check_device.py", "requirements.txt"]
+             "check_device.py", "setup_check.py", "icon.ico", "requirements.txt"]
 ANDROID_FILES = ["adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "scrcpy-server", "LICENSE.txt"]
 
 
@@ -122,7 +122,7 @@ def main():
     shutil.copy2(download(SIDELOADLY_URL, "SideloadlySetup64.exe"), inst)
 
     log("start files + guide")
-    for name in ("Start Mirror.bat", "START HERE.txt"):
+    for name in ("1 - SETUP (first time).bat", "2 - Start Mirror.bat", "START HERE.txt", "START HERE (guide).html"):
         shutil.copy2(os.path.join(ROOT, "tools", "portable", name), OUT)
 
     log("self-test: import everything with the portable Python")
@@ -130,6 +130,8 @@ def main():
                            "import core, android, audio_player, recorder, ui, winutil, mirror, pygame, av, "
                            "sounddevice, numpy, pymobiledevice3; print('[portable] self-test OK', android.available())"],
                           cwd=app)
+    log("self-test: setup checker (report only)")
+    subprocess.call([os.path.join(OUT, "python", "python.exe"), os.path.join(app, "setup_check.py"), "--check"], cwd=OUT)
 
     zpath = os.path.join(DIST, NAME + ".zip")
     log(f"zipping -> {zpath}")

@@ -5,25 +5,30 @@ Wi-Fi, with game sound, for OBS / TikTok LIVE Studio. No time limit, no
 watermark. Nothing to install for the mirror itself.
 
 
+EASIEST: open  "START HERE (guide).html"  (any browser, also on the phone).
+
+
 WHAT IS IN THIS FOLDER
-  Start Mirror.bat      double-click to start the mirror
-  app\                  the mirror program
-  python\               its own Python (does not touch the PC)
-  installers\           things some PCs need (see below)
+  1 - SETUP (first time).bat   run once on each new PC: checks it, offers to
+                               install what is missing, makes a Desktop shortcut
+  2 - Start Mirror.bat         starts the mirror (or the Desktop shortcut)
+  START HERE (guide).html      the full illustrated guide
+  app\  python\                the program and its own Python (touches nothing)
+  installers\                  Sideloadly, VB-Cable, the iPhone app (.ipa)
 
 
 FIRST TIME ON A NEW PC (about 5 minutes)
-  1. Unzip this folder somewhere simple, for example C:\iPhoneUSBMirror
-     (not inside a Google Drive / OneDrive sync folder).
-  2. Sound for the stream (OBS / TikTok): install VB-Audio Virtual Cable
-       installers\VBCABLE_Driver_Pack46.zip -> unzip -> right-click
-       VBCABLE_Setup_x64.exe -> Run as administrator -> Install Driver -> restart the PC.
-     (Skip this if you only want to watch, not stream.)
-  3. iPhone by USB only: install "Apple Devices" from the Microsoft Store
-     (or iTunes from apple.com). Not needed for iPhone over Wi-Fi or for Android.
-  4. Double-click  Start Mirror.bat .
-     If Windows says "Windows protected your PC": More info -> Run anyway.
-     If the Firewall asks about python or adb: Cancel is fine (not needed).
+  1. Downloaded from Google Drive? Right-click the ZIP -> Properties ->
+     tick "Unblock" -> OK. Then right-click -> Extract All -> C:\iPhoneUSBMirror
+     (not inside a OneDrive / Google Drive sync folder, not inside the zip).
+  2. Double-click  "1 - SETUP (first time).bat" .
+     "Windows protected your PC" -> More info -> Run anyway.
+     Type Y for what you need:
+       Apple Devices  - iPhone by USB cable + Sideloadly
+       Sideloadly     - to put the app on an iPhone
+       VB-Audio Cable - stream sound to OBS / TikTok (restart the PC after)
+  3. Start with the Desktop shortcut "iPhone USB Mirror".
+     If the Firewall asks about python or adb: Cancel is fine.
 
 
 IPHONE
@@ -32,7 +37,7 @@ IPHONE
   Wi-Fi: iPhone and PC on the SAME Wi-Fi (5 GHz is best), or connect the PC
          to the iPhone's Personal Hotspot. The first time, the iPhone asks
          "find devices on your local network" -> Allow.
-  Then: open USB Mirror on the iPhone -> round button -> iPhone USB Mirror
+  Then: open USB Mirror on the iPhone -> tap USB or Wi-Fi -> Start mirroring
         -> Start Broadcast. The picture appears by itself (W = search Wi-Fi now).
   First toolbar button (or L) chooses the connection:
     Auto = cable when plugged in, otherwise Wi-Fi  |  USB only  |  Wi-Fi only
@@ -41,11 +46,18 @@ IPHONE
 
   Free Apple ID: the app stops opening after 7 days. Re-install it:
     1. Stop the broadcast on the iPhone.
-    2. Install Sideloadly (installers\SideloadlySetup64.exe) - only once per PC;
-       Sideloadly needs Apple Devices / iTunes (step 3 above).
+    2. Sideloadly + Apple Devices must be installed (SETUP does it).
     3. Plug in the iPhone, drag installers\iPhoneUSBMirror.ipa into Sideloadly,
        type YOUR Apple ID, Start. Type the password yourself in Sideloadly only.
     4. iPhone: Settings > General > VPN & Device Management > trust your Apple ID.
+    5. First time only (iOS 16+): Settings > Privacy & Security > Developer Mode
+       ON -> restart -> Turn On.
+
+
+GO LIVE FROM THE IPHONE (no PC)
+  USB Mirror -> Go Live -> platform -> paste your stream key -> GO LIVE.
+  Arrow tab on the right edge = comments (tap again to hide).
+  "Screen hidden" = viewers see Be right back. Test with privacy "Only me".
 
 
 ANDROID (no app to install on the phone)
@@ -82,7 +94,7 @@ KEYS
 PROBLEMS
   - Black window, "Waiting for a phone": start the broadcast (iPhone) /
     tap Allow (Android). For Wi-Fi press W.
-  - iPhone by USB not found: install Apple Devices (step 3), unplug/replug, unlock.
+  - iPhone by USB not found: install Apple Devices (run SETUP), unplug/replug, unlock.
   - Stutters on Wi-Fi: use 5 GHz Wi-Fi or the iPhone Hotspot, or use the USB cable.
   - Smart App Control blocks a file: Windows Security > App & browser control.
   - No sound in OBS: Desktop Audio must be CABLE Input; press A in the mirror.

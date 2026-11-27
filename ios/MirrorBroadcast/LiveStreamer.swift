@@ -95,7 +95,7 @@ final class FrameShaper {
         if let t = transfer {
             VTSessionSetProperty(t, key: kVTPixelTransferPropertyKey_ScalingMode, value: kVTScalingMode_Letterbox)
         }
-        VTPixelRotationSessionCreate(allocator: nil, pixelRotationSessionOut: &rotation)
+        VTPixelRotationSessionCreate(nil, &rotation)
     }
 
     deinit {

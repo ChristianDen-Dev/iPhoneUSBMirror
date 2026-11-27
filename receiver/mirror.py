@@ -6,7 +6,10 @@ through usbmux (Apple Mobile Device service) over the USB cable, decodes the
 H.264 video and shows it in a window called "iPhone USB Mirror" for OBS
 Window Capture.
 
+Game sound plays on the default Windows output device (OBS "Desktop Audio").
+
 Keys:  F11 fullscreen | Esc leave fullscreen | F1 stats overlay
+       M  mute / unmute game sound
        R  flip landscape 180 deg (if the game shows upside-down)
 
 Debug: --tcp 127.0.0.1:2345 connects to a plain TCP address instead of usbmux
@@ -30,6 +33,8 @@ import av
 import numpy as np
 import pygame
 from pymobiledevice3 import usbmux
+
+from audio_player import AudioPlayer
 
 WINDOW_TITLE = "iPhone USB Mirror"
 DEVICE_PORT = 2345
@@ -71,8 +76,10 @@ class Shared:
         self.video_size = (0, 0)
         self.decode_ms = 0.0
         self.info = ""               # last diagnostic text from the iPhone
-        # audio hook (Phase 7)
-        self.on_audio = None
+        # audio
+        self.audio = None            # AudioPlayer
+        self.last_video_ts = 0       # iPhone timestamps (us) for A/V sync stats
+        self.last_audio_ts = 0
 
     def set_status(self, text):
         with self.lock:
@@ -134,6 +141,8 @@ class Receiver(threading.Thread):
                 except OSError:
                     pass
                 self.s.clear_frame()
+                if self.s.audio is not None:
+                    self.s.audio.reset()
             time.sleep(0.3)
 
     # ---- streaming --------------------------------------------------------
@@ -182,6 +191,7 @@ class Receiver(threading.Thread):
                     need_keyframe = True
                     continue
                 need_keyframe = False
+                self.s.last_video_ts = ts_us
                 for frame in frames:
                     self.present(frame)
                 self.s.decode_ms = (time.perf_counter() - t0) * 1000
@@ -189,9 +199,9 @@ class Receiver(threading.Thread):
                 if length >= 1:
                     self.s.orientation = payload[0]
             elif ptype == T_AUDIO_PCM:
-                cb = self.s.on_audio
-                if cb is not None:
-                    cb(ts_us, bytes(payload))
+                self.s.last_audio_ts = ts_us
+                if self.s.audio is not None:
+                    self.s.audio.feed(ts_us, bytes(payload))
             elif ptype == T_INFO:
                 text = bytes(payload).decode("utf-8", "replace")
                 self.s.info = text
@@ -272,6 +282,7 @@ def main():
 
     shared = Shared()
     load_settings(shared)
+    shared.audio = AudioPlayer()
 
     pygame.init()
     pygame.display.set_caption(WINDOW_TITLE)
@@ -309,6 +320,9 @@ def main():
                     screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
                 elif event.key == pygame.K_F1:
                     show_stats = not show_stats
+                elif event.key == pygame.K_m:
+                    muted = shared.audio.toggle_mute()
+                    print(f"[audio] {'muted' if muted else 'unmuted'}", flush=True)
                 elif event.key == pygame.K_r:
                     shared.flip_landscape = not shared.flip_landscape
                     save_settings(shared)
@@ -351,17 +365,22 @@ def main():
             log_tick += 1
             if current is not None and log_tick % 5 == 0:   # console log every ~5 s
                 vw, vh = shared.video_size
+                a = shared.audio
                 print(f"[mirror] {time.strftime('%H:%M:%S')} fps {fps_value:.1f} | {rate_value:.2f} Mbps | "
-                      f"video {vw}x{vh} | orient {shared.orientation} | decode {shared.decode_ms:.1f} ms",
-                      flush=True)
+                      f"video {vw}x{vh} | orient {shared.orientation} | decode {shared.decode_ms:.1f} ms | "
+                      f"audio buf {a.buffered_ms:.0f} ms, underruns {a.underruns}, skips {a.skips}"
+                      f"{' MUTED' if a.muted else ''}", flush=True)
         if show_stats:
             vw, vh = shared.video_size
             lines = [
                 f"FPS {fps_value:5.1f}   {rate_value:5.2f} Mbps",
                 f"video {vw}x{vh}  orient {shared.orientation}  flip {'on' if shared.flip_landscape else 'off'}",
                 f"decode {shared.decode_ms:4.1f} ms   window {win_w}x{win_h}",
+                f"audio buf {shared.audio.buffered_ms:3.0f} ms  underruns {shared.audio.underruns}  "
+                f"skips {shared.audio.skips}  {'MUTED' if shared.audio.muted else ''}  "
+                f"A-V {(shared.last_audio_ts - shared.last_video_ts) / 1000:+.0f} ms",
                 f"iPhone: {shared.info or '-'}",
-                "F11 fullscreen  R flip  F1 hide",
+                "F11 fullscreen  M mute  R flip  F1 hide",
             ]
             y = 8
             for line in lines:
@@ -372,6 +391,7 @@ def main():
         pygame.display.flip()
         clock.tick(120)
 
+    shared.audio.close()
     pygame.quit()
 
 

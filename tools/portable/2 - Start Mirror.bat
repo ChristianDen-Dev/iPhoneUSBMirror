@@ -1,6 +1,6 @@
 @echo off
-rem iPhone USB Mirror - portable start (no install needed)
-title iPhone USB Mirror (log window - you can minimize it)
+rem Den-Dev Live - portable start (no install needed)
+title Den-Dev Live (log window - you can minimize it)
 cd /d "%~dp0app"
 if not exist "%~dp0python\python.exe" (
   echo The "python" folder is missing. Extract the WHOLE zip first ^(right-click -^> Extract All^).

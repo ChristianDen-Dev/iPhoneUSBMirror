@@ -329,7 +329,7 @@ final class AppModel: ObservableObject {
     /// (needed once for Wi-Fi mirroring).
     private func startBonjour() {
         guard bonjour == nil, let l = try? NWListener(using: .tcp) else { return }
-        l.service = NWListener.Service(name: "iPhone USB Mirror", type: "_usbmirror._tcp")
+        l.service = NWListener.Service(name: "Den-Dev Live", type: "_usbmirror._tcp")
         l.newConnectionHandler = { $0.cancel() }
         l.start(queue: .main)
         bonjour = l

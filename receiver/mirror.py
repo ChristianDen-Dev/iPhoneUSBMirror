@@ -1,8 +1,8 @@
 """
-mirror.py - iPhone USB Mirror receiver (Windows). Run this file.
+mirror.py - Den-Dev Live receiver (Windows). Run this file.
 
 Shows the iPhone screen (sent over the USB cable by the iPhone app's
-broadcast) in a window called "iPhone USB Mirror" and plays the game sound.
+broadcast) in a window called "Den-Dev Live" and plays the game sound.
 
 Three window modes:
   Normal      : proper window with a toolbar (buttons), live status bar and
@@ -37,7 +37,7 @@ from recorder import Recorder
 from ui import (ACCENT, AMBER, BG, DIM, FAINT, GREEN, HEAT_COLORS, HOVER, LINE, ON, PANEL,
                 PANEL_2, PRESSED, RED, TEXT)
 
-WINDOW_TITLE = "iPhone USB Mirror"
+WINDOW_TITLE = "Den-Dev Live"
 APP_FOLDER = "iPhone USB Mirror"
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
@@ -943,7 +943,7 @@ class App:
         found = self.s.found
         steps = [
             ("iPhone: USB cable or same Wi-Fi  \u00b7  Android: USB cable + USB debugging ON", st != ST_NO_USB),
-            ("iPhone: USB Mirror app \u2192 round button \u2192 Start Broadcast  \u00b7  Android: tap Allow",
+            ("iPhone: Den-Dev Live app \u2192 round button \u2192 Start Broadcast  \u00b7  Android: tap Allow",
              st == ST_CONNECTED),
             ("Open your game - the picture appears here", False),
         ]
@@ -981,7 +981,7 @@ class App:
         if found == "android_error" and self.s.hint:
             tip = "Problem: " + self.s.hint
         elif found == "iphone_wifi":
-            tip = ("Not answering? Install the NEW USB Mirror app (Sideloadly), allow Local Network, "
+            tip = ("Not answering? Install the NEW Den-Dev Live app (Sideloadly), allow Local Network, "
                    "then Start Broadcast")
         elif found == "android_unauth":
             tip = "On the phone: tick 'Always allow from this computer' \u2192 Allow"
@@ -1202,7 +1202,7 @@ class App:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="iPhone USB Mirror receiver (iPhone + Android, USB + Wi-Fi)")
+    parser = argparse.ArgumentParser(description="Den-Dev Live receiver (iPhone + Android, USB + Wi-Fi)")
     parser.add_argument("--tcp", help="debug: connect to HOST:PORT instead of usbmux")
     args = parser.parse_args()
     tcp_address = None

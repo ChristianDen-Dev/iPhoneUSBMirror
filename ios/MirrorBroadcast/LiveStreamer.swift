@@ -186,7 +186,14 @@ final class Compositor {
     private func picture(_ src: CVPixelBuffer, orientation: UInt8) -> CIImage {
         let W = CGFloat(width), H = CGFloat(height)
         var img = CIImage(cvPixelBuffer: src)
-        if let o = CGImagePropertyOrientation(rawValue: UInt32(orientation)), o != .up { img = img.oriented(o) }
+        // ReplayKit orientation -> turn needed (same table as the laptop receiver, checked with Mobile Legends):
+        // 3/4 = 180, 5/6 = 90 counter-clockwise, 7/8 = 90 clockwise
+        switch orientation {
+        case 3, 4: img = img.oriented(.down)
+        case 5, 6: img = img.oriented(.left)
+        case 7, 8: img = img.oriented(.right)
+        default: break
+        }
         img = img.transformed(by: CGAffineTransform(translationX: -img.extent.minX, y: -img.extent.minY))
         let e = img.extent
         let sFit = min(W / e.width, H / e.height)
@@ -302,6 +309,100 @@ final class Compositor {
     }
 }
 
+// MARK: - smooth audio: our own mixer on a steady clock
+
+/// ReplayKit delivers game sound and mic in uneven bursts. Sent straight to
+/// the stream that sounds broken. Here both are converted to 48 kHz stereo,
+/// kept in a small buffer (~100 ms) and read out by a steady clock, mixed,
+/// so the stream always gets smooth, continuous audio (silence when nothing plays).
+final class AudioClock {
+    static let rate = 48_000.0
+    let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+
+    private final class Source {
+        var converter: AVAudioConverter?
+        var inFormat: AVAudioFormat?
+        var left: [Float] = []
+        var right: [Float] = []
+        var primed = false
+        var volume: Float = 1
+    }
+    private let game = Source()
+    private let mic = Source()
+    private let lock = NSLock()
+    private let target = 4_800        // 100 ms buffer before playing
+    private let maxKeep = 14_400      // never more than 300 ms behind
+
+    func setVolumes(game g: Double, mic m: Double) {
+        lock.lock(); game.volume = Float(g); mic.volume = Float(m); lock.unlock()
+    }
+
+    /// A ReplayKit audio buffer (game sound or mic).
+    func push(_ sb: CMSampleBuffer, isMic: Bool) {
+        guard sb.dataReadiness == .ready, let fd = sb.formatDescription else { return }
+        let inFmt = AVAudioFormat(cmAudioFormatDescription: fd)
+        let frames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sb))
+        guard frames > 0, let inBuf = AVAudioPCMBuffer(pcmFormat: inFmt, frameCapacity: frames) else { return }
+        inBuf.frameLength = frames
+        guard CMSampleBufferCopyPCMDataIntoAudioBufferList(sb, at: 0, frameCount: Int32(frames),
+                                                           into: inBuf.mutableAudioBufferList) == noErr else { return }
+        let src = isMic ? mic : game
+        if src.converter == nil || src.inFormat != inFmt {
+            src.converter = AVAudioConverter(from: inFmt, to: format)
+            if inFmt.channelCount == 1 { src.converter?.channelMap = [0, 0] }   // mono -> both ears
+            src.inFormat = inFmt
+        }
+        guard let conv = src.converter else { return }
+        let cap = AVAudioFrameCount(Double(frames) * Self.rate / inFmt.sampleRate) + 256
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: cap) else { return }
+        var given = false
+        var err: NSError?
+        _ = conv.convert(to: outBuf, error: &err) { _, status in
+            if given { status.pointee = .noDataNow; return nil }
+            given = true
+            status.pointee = .haveData
+            return inBuf
+        }
+        let n = Int(outBuf.frameLength)
+        guard n > 0, let ch = outBuf.floatChannelData else { return }
+        lock.lock()
+        src.left.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: n))
+        src.right.append(contentsOf: UnsafeBufferPointer(start: ch[min(1, Int(format.channelCount) - 1)], count: n))
+        if src.left.count > maxKeep {                     // fell behind: jump to ~100 ms
+            let drop = src.left.count - target
+            src.left.removeFirst(drop); src.right.removeFirst(drop)
+        }
+        lock.unlock()
+    }
+
+    /// Next `frames` of mixed audio (always returns a buffer).
+    func pull(_ frames: AVAudioFrameCount) -> AVAudioPCMBuffer? {
+        guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames), let ch = out.floatChannelData else { return nil }
+        out.frameLength = frames
+        let n = Int(frames)
+        memset(ch[0], 0, n * 4); memset(ch[1], 0, n * 4)
+        lock.lock()
+        for src in [game, mic] {
+            if !src.primed && src.left.count >= target { src.primed = true }
+            guard src.primed else { continue }
+            let take = min(n, src.left.count)
+            let v = src.volume
+            for i in 0..<take {
+                ch[0][i] += src.left[i] * v
+                ch[1][i] += src.right[i] * v
+            }
+            src.left.removeFirst(take); src.right.removeFirst(take)
+            if src.left.isEmpty && take < n { src.primed = false }   // ran dry: build the buffer up again
+        }
+        lock.unlock()
+        for i in 0..<n {                                  // simple limiter: no harsh clipping
+            ch[0][i] = max(-1, min(1, ch[0][i]))
+            ch[1][i] = max(-1, min(1, ch[1][i]))
+        }
+        return out
+    }
+}
+
 // MARK: - live streamer
 
 final class LiveStreamer: @unchecked Sendable {
@@ -310,7 +411,8 @@ final class LiveStreamer: @unchecked Sendable {
 
     private let cfg: LiveConfig
     private let compositor: Compositor
-    private let mixer = MediaMixer(captureSessionMode: .manual, multiTrackAudioMixingEnabled: true)
+    private let mixer = MediaMixer(captureSessionMode: .manual, multiTrackAudioMixingEnabled: false)
+    private let audioClock = AudioClock()
     private var session: (any Session)?
     private let statusServer = MirrorServer(port: LinkPorts.status)
 
@@ -338,6 +440,7 @@ final class LiveStreamer: @unchecked Sendable {
     private var idleTimer: DispatchSourceTimer?
     private var silentTimer: DispatchSourceTimer?
     private var lastSentPTS = CMTime.invalid
+    private var recentDrops: [Date] = []
     private let minFrameGap: Double
 
     init(config: LiveConfig) {
@@ -354,7 +457,7 @@ final class LiveStreamer: @unchecked Sendable {
 
     func start() {
         guard let url = cfg.publishURL, ["rtmp", "rtmps"].contains(url.scheme?.lowercased() ?? "") else {
-            onFatal?("Go Live: the server or stream key is missing or wrong. Open USB Mirror \u{2192} Go Live and check them.")
+            onFatal?("Go Live: the server or stream key is missing or wrong. Open Den-Dev Live \u{2192} Go Live and check them.")
             return
         }
         setState("connecting")
@@ -420,16 +523,7 @@ final class LiveStreamer: @unchecked Sendable {
             var vm = await mixer.videoMixerSettings
             vm.mode = .passthrough                             // frames are already shaped
             await mixer.setVideoMixerSettings(vm)
-            var am = await mixer.audioMixerSettings
-            // Track 2 = our own steady silent clock. It drives the mix, so the
-            // stream ALWAYS has audio from the first second, even when nothing
-            // plays (Facebook cannot play a stream whose audio is missing or
-            // starts late). Game sound (1) and mic (0) are mixed on top.
-            am.mainTrack = 2
-            am.tracks[2] = AudioMixerTrackSettings(volume: 1)
-            am.tracks[0] = AudioMixerTrackSettings(volume: Float(cfg.micVolume))
-            am.tracks[1] = AudioMixerTrackSettings(volume: Float(cfg.gameVolume))
-            await mixer.setAudioMixerSettings(am)
+            // audio: AudioClock mixes game + mic on a steady clock -> one track
             await mixer.startRunning()
             await mixer.addOutput(stream)
 
@@ -471,8 +565,11 @@ final class LiveStreamer: @unchecked Sendable {
     private func retryLater() {
         lock.lock()
         status.reconnects += 1
-        let n = status.reconnects
+        let now = Date()
+        recentDrops = recentDrops.filter { now.timeIntervalSince($0) < 120 } + [now]
+        let n = recentDrops.count
         lock.unlock()
+        NSLog("[Mirror] reconnect \(n) in the last 2 min")
         if n > 10 {
             fail("The live connection was lost (no internet?). The broadcast was stopped.")
             return
@@ -485,6 +582,7 @@ final class LiveStreamer: @unchecked Sendable {
     }
 
     private func fail(_ message: String) {
+        NSLog("[Mirror] live stopped: \(message)")
         lock.lock(); status.message = message; lock.unlock()
         setState("error")
         sendStatus()
@@ -518,11 +616,12 @@ final class LiveStreamer: @unchecked Sendable {
             framesThisSecond += 1
             lock.unlock()
         case .audioApp:
-            if sb.dataReadiness == .ready { feed.yield(.sample(sb, 1)) }
+            _ = feed
+            audioClock.push(sb, isMic: false)
         case .audioMic:
             micSeen = true
             lock.lock(); let muted = micMuted; lock.unlock()
-            if !muted && sb.dataReadiness == .ready { feed.yield(.sample(sb, 0)) }
+            if !muted { audioClock.push(sb, isMic: true) }
         @unknown default:
             break
         }
@@ -546,9 +645,11 @@ final class LiveStreamer: @unchecked Sendable {
         return sb
     }
 
-    /// Steady 48 kHz silence, timed by the host clock (same clock as the video).
+    /// Steady 48 kHz audio (game + mic from AudioClock, silence when quiet),
+    /// timed by the host clock (same clock as the video), so the stream always
+    /// has smooth audio that starts together with the picture.
     private func startSilentClock() {
-        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2) else { return }
+        audioClock.setVolumes(game: cfg.gameVolume, mic: cfg.micVolume)
         let start = mach_absolute_time()
         let startSec = AVAudioTime.seconds(forHostTime: start)
         var sent: Int64 = 0
@@ -561,14 +662,10 @@ final class LiveStreamer: @unchecked Sendable {
             var guardCount = 0
             while sent + Int64(chunk) <= due && guardCount < 8 {
                 guardCount += 1
-                guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: chunk) else { return }
-                buf.frameLength = chunk
-                if let ch = buf.floatChannelData {
-                    for c in 0..<Int(fmt.channelCount) { memset(ch[c], 0, Int(chunk) * MemoryLayout<Float>.size) }
-                }
+                guard let buf = self.audioClock.pull(chunk) else { return }
                 let host = AVAudioTime.hostTime(forSeconds: startSec + Double(sent) / 48_000)
                 let when = AVAudioTime(hostTime: host, sampleTime: sent, atRate: 48_000)
-                feed.yield(.pcm(buf, when, 2))
+                feed.yield(.pcm(buf, when, 0))
                 sent += Int64(chunk)
             }
             if due - sent > 48_000 { sent = due - due % Int64(chunk) }   // after a long stall, do not burst
@@ -611,6 +708,7 @@ final class LiveStreamer: @unchecked Sendable {
             self.micMuted = c.micMuted
             self.lock.unlock()
             self.compositor.update(StreamLook(c))
+            self.audioClock.setVolumes(game: c.gameVolume, mic: c.micVolume)
         }
         let session = self.session
         Task {

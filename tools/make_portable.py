@@ -3,8 +3,8 @@ make_portable.py - builds the "copy to any Windows PC" package.
 
     receiver\.venv\Scripts\python.exe tools\make_portable.py
 
-Result:  dist\iPhoneUSBMirror_Portable\        (folder)
-         dist\iPhoneUSBMirror_Portable.zip     (upload this to Google Drive)
+Result:  dist\DenDevLive_Portable\        (folder)
+         dist\DenDevLive_Portable.zip     (upload this to Google Drive)
 
 The package needs NO Python install on the other PC: it carries the official
 "embeddable" Python from python.org plus all libraries, the Android tools
@@ -26,7 +26,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RECEIVER = os.path.join(ROOT, "receiver")
 DL = os.path.join(ROOT, "build", "dl")
 DIST = os.path.join(ROOT, "dist")
-NAME = "iPhoneUSBMirror_Portable"
+NAME = "DenDevLive_Portable"
 OUT = os.path.join(DIST, NAME)
 
 PY_VERSION = "3.14.8"                       # same as the development venv

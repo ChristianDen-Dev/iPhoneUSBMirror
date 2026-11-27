@@ -72,7 +72,7 @@ struct HomeView: View {
                 Image(systemName: "iphone.radiowaves.left.and.right").font(.system(size: 26, weight: .bold)).foregroundColor(.white)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("USB Mirror").font(.largeTitle.weight(.heavy)).foregroundColor(.white)
+                Text("Den-Dev Live").font(.largeTitle.weight(.heavy)).foregroundColor(.white)
                 Text("Mirror \u{00b7} Stream \u{00b7} Go Live").font(.subheadline.weight(.medium)).foregroundColor(Theme.dim)
             }
         }
@@ -181,7 +181,7 @@ struct MirrorModeView: View {
                             } else {
                                 StepRow(number: 1, text: "iPhone and laptop on the same Wi-Fi (5 GHz is best), or the laptop on this iPhone's Personal Hotspot.", color: colors[0])
                             }
-                            StepRow(number: 2, text: "Open iPhone USB Mirror on the laptop (Start Mirror).", color: colors[0])
+                            StepRow(number: 2, text: "Open Den-Dev Live on the laptop (Start Mirror).", color: colors[0])
                             StepRow(number: 3, text: "Tap the button below \u{2192} Start Broadcast.", color: colors[0])
                             StepRow(number: 4, text: "Open your game. Stop any time from the red pill / Control Center.", color: colors[0])
                         }
@@ -224,7 +224,7 @@ struct MirrorModeView: View {
                     Image(systemName: model.addresses.isEmpty ? "wifi.slash" : "checkmark.seal.fill")
                         .font(.title2).foregroundColor(model.addresses.isEmpty ? .orange : colors[0])
                 }
-                Text("If iOS asks to find devices on your local network, tap Allow (Settings \u{203a} Privacy \u{203a} Local Network \u{203a} USB Mirror).")
+                Text("If iOS asks to find devices on your local network, tap Allow (Settings \u{203a} Privacy \u{203a} Local Network \u{203a} Den-Dev Live).")
                     .font(.caption).foregroundColor(Theme.faint)
             }
         }

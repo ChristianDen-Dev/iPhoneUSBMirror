@@ -1,4 +1,4 @@
-iPhone USB Mirror - portable package
+Den-Dev Live - portable package
 ====================================
 Mirrors an iPhone OR an Android phone to this Windows PC, by USB cable or by
 Wi-Fi, with game sound, for OBS / TikTok LIVE Studio. No time limit, no
@@ -27,17 +27,17 @@ FIRST TIME ON A NEW PC (about 5 minutes)
        Apple Devices  - iPhone by USB cable + Sideloadly
        Sideloadly     - to put the app on an iPhone
        VB-Audio Cable - stream sound to OBS / TikTok (restart the PC after)
-  3. Start with the Desktop shortcut "iPhone USB Mirror".
+  3. Start with the Desktop shortcut "Den-Dev Live".
      If the Firewall asks about python or adb: Cancel is fine.
 
 
 IPHONE
-  The "USB Mirror" app must be on the iPhone (installed with Sideloadly).
+  The "Den-Dev Live" app must be on the iPhone (installed with Sideloadly).
   USB : plug in, unlock, tap Trust if asked.
   Wi-Fi: iPhone and PC on the SAME Wi-Fi (5 GHz is best), or connect the PC
          to the iPhone's Personal Hotspot. The first time, the iPhone asks
          "find devices on your local network" -> Allow.
-  Then: open USB Mirror on the iPhone -> tap USB or Wi-Fi -> Start mirroring
+  Then: open Den-Dev Live on the iPhone -> tap USB or Wi-Fi -> Start mirroring
         -> Start Broadcast. The picture appears by itself (W = search Wi-Fi now).
   First toolbar button (or L) chooses the connection:
     Auto = cable when plugged in, otherwise Wi-Fi  |  USB only  |  Wi-Fi only
@@ -55,7 +55,7 @@ IPHONE
 
 
 GO LIVE FROM THE IPHONE (no PC)
-  USB Mirror -> Go Live -> platform -> paste your stream key -> GO LIVE.
+  Den-Dev Live -> Go Live -> platform -> paste your stream key -> GO LIVE.
   Arrow tab on the right edge = comments (tap again to hide).
   "Screen hidden" = viewers see Be right back. Test with privacy "Only me".
 
@@ -76,7 +76,7 @@ ANDROID (no app to install on the phone)
 
 
 OBS / TIKTOK LIVE STUDIO
-  Picture : Window Capture -> "[python.exe]: iPhone USB Mirror" (Capture Audio OFF).
+  Picture : Window Capture -> "[python.exe]: Den-Dev Live" (Capture Audio OFF).
             Press F2 in the mirror for Stream Mode (clean picture, exact size).
   Sound   : Desktop Audio = CABLE Input (VB-Audio Virtual Cable). Mic/Aux = Disabled.
             The mirror already mixes game sound + your mic into the cable.

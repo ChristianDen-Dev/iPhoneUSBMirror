@@ -230,7 +230,7 @@ def sideloadly_installed():
 
 def check_sideloadly():
     if sideloadly_installed():
-        ok("Sideloadly (puts the USB Mirror app on the iPhone)")
+        ok("Sideloadly (puts the Den-Dev Live app on the iPhone)")
         return True
     warn("Sideloadly is not installed. Needed only to INSTALL / RENEW the app on an iPhone.")
     if ask("Install Sideloadly now?"):
@@ -246,11 +246,11 @@ def make_shortcut():
     desk = powershell("[Environment]::GetFolderPath('Desktop')")
     if not desk:
         return
-    lnk = os.path.join(desk, "iPhone USB Mirror.lnk")
+    lnk = os.path.join(desk, "Den-Dev Live.lnk")
     if os.path.isfile(lnk):
-        ok("Desktop shortcut 'iPhone USB Mirror' is there")
+        ok("Desktop shortcut 'Den-Dev Live' is there")
         return
-    if not ask("Put an 'iPhone USB Mirror' shortcut on the Desktop?"):
+    if not ask("Put an 'Den-Dev Live' shortcut on the Desktop?"):
         return
     icon = ICON if os.path.isfile(ICON) else PYTHON
     ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');"
@@ -265,7 +265,7 @@ def make_shortcut():
 
 def main():
     print()
-    print(f"{BOLD}  iPhone USB Mirror - first-time setup{END}")
+    print(f"{BOLD}  Den-Dev Live - first-time setup{END}")
     print("  ------------------------------------")
     print("  Checking this PC. Nothing is installed unless you type Y.\n")
 

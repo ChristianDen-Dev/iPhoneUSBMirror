@@ -240,7 +240,7 @@ struct FloatingComments: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 6) {
                         if browser.messages.isEmpty {
-                            bubble(author: "USB Mirror", text: model.commentsPage == nil
+                            bubble(author: "Den-Dev Live", text: model.commentsPage == nil
                                    ? "Tap Full chat and paste your live link to see comments here."
                                    : "Waiting for comments\u{2026} (open Full chat once to sign in)", system: true)
                         }

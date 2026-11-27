@@ -10,6 +10,7 @@ Game sound plays on the default Windows output device (OBS "Desktop Audio").
 
 Keys:  F11 fullscreen | Esc leave fullscreen | F1 stats overlay
        M  mute / unmute game sound
+       S  sharpening on/off (used when the iPhone picture is enlarged)
        R  flip landscape 180 deg (if the game shows upside-down)
 
 Debug: --tcp 127.0.0.1:2345 connects to a plain TCP address instead of usbmux
@@ -28,6 +29,7 @@ import struct
 import sys
 import threading
 import time
+from fractions import Fraction
 
 import av
 import numpy as np
@@ -70,6 +72,7 @@ class Shared:
         self.target_size = (1280, 720)  # current window size (set by main thread)
         self.orientation = 1
         self.flip_landscape = False
+        self.sharpen = True          # unsharp mask when enlarging small frames
         # stats
         self.bytes_total = 0
         self.frames_decoded = 0
@@ -95,10 +98,36 @@ class Shared:
 # Network + decode thread
 # --------------------------------------------------------------------------
 class Receiver(threading.Thread):
+    # Enlarging more than this -> Lanczos + sharpening filter.
+    UPSCALE_SHARPEN_AT = 1.15
+    UNSHARP = "5:5:1.0:5:5:0.0"   # luma 5x5 amount 1.0, chroma 5x5 off
+
     def __init__(self, shared: Shared, tcp_address=None):
         super().__init__(daemon=True, name="receiver")
         self.s = shared
         self.tcp_address = tcp_address
+        self._graph = None
+        self._graph_key = None
+        self._pts = 0
+
+    def _scale_filter(self, frame, w, h):
+        """Lanczos scale + unsharp mask via an FFmpeg filter graph (cached)."""
+        key = (frame.width, frame.height, frame.format.name, w, h)
+        if key != self._graph_key:
+            g = av.filter.Graph()
+            src = g.add_buffer(width=frame.width, height=frame.height,
+                               format=frame.format.name, time_base=Fraction(1, 1000))
+            scale = g.add("scale", f"{w}:{h}:flags=lanczos")
+            sharp = g.add("unsharp", self.UNSHARP)
+            fmt = g.add("format", "rgb24")
+            sink = g.add("buffersink")
+            src.link_to(scale); scale.link_to(sharp); sharp.link_to(fmt); fmt.link_to(sink)
+            g.configure()
+            self._graph, self._graph_key = g, key
+        self._pts += 1
+        frame.pts = self._pts
+        self._graph.push(frame)
+        return self._graph.pull().to_ndarray()
 
     # ---- connection -------------------------------------------------------
     async def _usb_connect(self):
@@ -220,10 +249,19 @@ class Receiver(threading.Thread):
         ow, oh = max(2, int(rw * scale) & ~1), max(2, int(rh * scale) & ~1)
         # size to ask swscale for (before rotation)
         sw, sh = (oh, ow) if k % 2 else (ow, oh)
-        # Upscaling (small iPhone picture -> big window): Lanczos keeps edges/text
-        # sharper. Downscaling: bilinear is enough and cheaper.
-        interp = "LANCZOS" if sw > fw or sh > fh else "BILINEAR"
-        rgb = frame.reformat(width=sw, height=sh, format="rgb24", interpolation=interp).to_ndarray()
+        # Enlarging a small iPhone picture: Lanczos + sharpening keeps edges and
+        # text crisp. Same size / shrinking: plain bilinear is enough.
+        upscale = sw / fw
+        rgb = None
+        if self.s.sharpen and upscale > self.UPSCALE_SHARPEN_AT:
+            try:
+                rgb = self._scale_filter(frame, sw, sh)
+            except Exception as e:  # never let the filter break the stream
+                print(f"[mirror] sharpen filter failed, using plain scaling: {e}", flush=True)
+                self.s.sharpen = False
+        if rgb is None:
+            interp = "LANCZOS" if upscale > 1.0 else "BILINEAR"
+            rgb = frame.reformat(width=sw, height=sh, format="rgb24", interpolation=interp).to_ndarray()
         # PyAV rows can be padded (and rot90 returns a view): pygame needs a
         # tightly packed C-contiguous buffer.
         rgb = np.ascontiguousarray(np.rot90(rgb, k) if k else rgb)
@@ -240,7 +278,9 @@ class Receiver(threading.Thread):
 def load_settings(shared):
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            shared.flip_landscape = bool(json.load(f).get("flip_landscape", False))
+            data = json.load(f)
+            shared.flip_landscape = bool(data.get("flip_landscape", False))
+            shared.sharpen = bool(data.get("sharpen", True))
     except (OSError, ValueError):
         pass
 
@@ -248,7 +288,7 @@ def load_settings(shared):
 def save_settings(shared):
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"flip_landscape": shared.flip_landscape}, f)
+            json.dump({"flip_landscape": shared.flip_landscape, "sharpen": shared.sharpen}, f)
     except OSError:
         pass
 
@@ -326,6 +366,10 @@ def main():
                 elif event.key == pygame.K_m:
                     muted = shared.audio.toggle_mute()
                     print(f"[audio] {'muted' if muted else 'unmuted'}", flush=True)
+                elif event.key == pygame.K_s:
+                    shared.sharpen = not shared.sharpen
+                    save_settings(shared)
+                    print(f"[mirror] sharpen {'on' if shared.sharpen else 'off'}", flush=True)
                 elif event.key == pygame.K_r:
                     shared.flip_landscape = not shared.flip_landscape
                     save_settings(shared)
@@ -383,7 +427,8 @@ def main():
                 f"skips {shared.audio.skips}  {'MUTED' if shared.audio.muted else ''}  "
                 f"A-V {(shared.last_audio_ts - shared.last_video_ts) / 1000:+.0f} ms",
                 f"iPhone: {shared.info or '-'}",
-                "F11 fullscreen  M mute  R flip  F1 hide",
+                f"sharpen {'on' if shared.sharpen else 'off'}",
+                "F11 fullscreen  M mute  S sharpen  R flip  F1 hide",
             ]
             y = 8
             for line in lines:

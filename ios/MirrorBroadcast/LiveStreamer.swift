@@ -7,6 +7,7 @@
 //
 // Library: HaishinKit 2.2.5 (BSD-3-Clause), https://github.com/HaishinKit/HaishinKit.swift
 
+import AVFoundation
 import CoreImage
 import CoreMedia
 import CoreVideo
@@ -314,7 +315,11 @@ final class LiveStreamer: @unchecked Sendable {
     private let statusServer = MirrorServer(port: LinkPorts.status)
 
     // ordered hand-off of buffers into the async library
-    private var feed: AsyncStream<(CMSampleBuffer, UInt8)>.Continuation?
+    private enum Item {
+        case sample(CMSampleBuffer, UInt8)
+        case pcm(AVAudioPCMBuffer, AVAudioTime, UInt8)
+    }
+    private var feed: AsyncStream<Item>.Continuation?
     private var feedTask: Task<Void, Never>?
 
     private let lock = NSLock()
@@ -331,6 +336,8 @@ final class LiveStreamer: @unchecked Sendable {
     private var privacy = false             // live controls from the app
     private var micMuted = false
     private var idleTimer: DispatchSourceTimer?
+    private var silentTimer: DispatchSourceTimer?
+    private var lastSentPTS = CMTime.invalid
     private let minFrameGap: Double
 
     init(config: LiveConfig) {
@@ -354,23 +361,28 @@ final class LiveStreamer: @unchecked Sendable {
         statusServer.onTick = { [weak self] in self?.tick() }
         statusServer.start()
 
-        var cont: AsyncStream<(CMSampleBuffer, UInt8)>.Continuation?
-        let stream = AsyncStream<(CMSampleBuffer, UInt8)>(bufferingPolicy: .bufferingNewest(40)) { cont = $0 }
+        var cont: AsyncStream<Item>.Continuation?
+        let stream = AsyncStream<Item>(bufferingPolicy: .bufferingNewest(120)) { cont = $0 }
         feed = cont
         let mixer = self.mixer
         feedTask = Task {
-            for await (sb, track) in stream {
-                await mixer.append(sb, track: track)
+            for await item in stream {
+                switch item {
+                case .sample(let sb, let track): await mixer.append(sb, track: track)
+                case .pcm(let buf, let when, let track): await mixer.append(buf, when: when, track: track)
+                }
             }
         }
 
         startIdleTimer()
+        startSilentClock()
         Task { await self.setUp(url) }
     }
 
     func stop() {
         lock.lock(); stopped = true; lock.unlock()
         idleTimer?.cancel(); idleTimer = nil
+        silentTimer?.cancel(); silentTimer = nil
         feed?.finish()
         setState("ended")
         let session = self.session, mixer = self.mixer
@@ -409,7 +421,12 @@ final class LiveStreamer: @unchecked Sendable {
             vm.mode = .passthrough                             // frames are already shaped
             await mixer.setVideoMixerSettings(vm)
             var am = await mixer.audioMixerSettings
-            am.mainTrack = 1                                   // game sound always exists; mic is optional
+            // Track 2 = our own steady silent clock. It drives the mix, so the
+            // stream ALWAYS has audio from the first second, even when nothing
+            // plays (Facebook cannot play a stream whose audio is missing or
+            // starts late). Game sound (1) and mic (0) are mixed on top.
+            am.mainTrack = 2
+            am.tracks[2] = AudioMixerTrackSettings(volume: 1)
             am.tracks[0] = AudioMixerTrackSettings(volume: Float(cfg.micVolume))
             am.tracks[1] = AudioMixerTrackSettings(volume: Float(cfg.gameVolume))
             await mixer.setAudioMixerSettings(am)
@@ -493,20 +510,19 @@ final class LiveStreamer: @unchecked Sendable {
             if let n = CMGetAttachment(sb, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber {
                 orient = n.uint8Value
             }
-            guard let shaped = compose(px, orient: orient, pts: pts) else { return }
+            guard compose(px, orient: orient, pts: pts) != nil else { return }   // makes + sends the frame
             lastPTS = pts
             lock.lock()
             lastSource = px
             lastOrient = orient
             framesThisSecond += 1
             lock.unlock()
-            feed.yield((shaped, 0))
         case .audioApp:
-            if sb.dataReadiness == .ready { feed.yield((sb, 1)) }
+            if sb.dataReadiness == .ready { feed.yield(.sample(sb, 1)) }
         case .audioMic:
             micSeen = true
             lock.lock(); let muted = micMuted; lock.unlock()
-            if !muted && sb.dataReadiness == .ready { feed.yield((sb, 0)) }
+            if !muted && sb.dataReadiness == .ready { feed.yield(.sample(sb, 0)) }
         @unknown default:
             break
         }
@@ -521,7 +537,44 @@ final class LiveStreamer: @unchecked Sendable {
         guard let out = compositor.render(px, orientation: orient, privacy: hide, seconds: seconds) else { return nil }
         lock.lock(); defer { lock.unlock() }
         lastFrameTime = CFAbsoluteTimeGetCurrent()
-        return Compositor.sampleBuffer(out, pts: pts, format: &format)
+        // the RTMP muxer drops any frame whose time is not after the last one
+        var t = pts
+        if lastSentPTS.isValid && t <= lastSentPTS { t = lastSentPTS + CMTime(value: 1, timescale: 1000) }
+        guard let sb = Compositor.sampleBuffer(out, pts: t, format: &format) else { return nil }
+        lastSentPTS = t
+        feed?.yield(.sample(sb, 0))
+        return sb
+    }
+
+    /// Steady 48 kHz silence, timed by the host clock (same clock as the video).
+    private func startSilentClock() {
+        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2) else { return }
+        let start = mach_absolute_time()
+        let startSec = AVAudioTime.seconds(forHostTime: start)
+        var sent: Int64 = 0
+        let chunk: AVAudioFrameCount = 1024
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "live.silence", qos: .userInteractive))
+        t.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(2))
+        t.setEventHandler { [weak self] in
+            guard let self = self, let feed = self.feed, !self.isStopped else { return }
+            let due = Int64((AVAudioTime.seconds(forHostTime: mach_absolute_time()) - startSec) * 48_000)
+            var guardCount = 0
+            while sent + Int64(chunk) <= due && guardCount < 8 {
+                guardCount += 1
+                guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: chunk) else { return }
+                buf.frameLength = chunk
+                if let ch = buf.floatChannelData {
+                    for c in 0..<Int(fmt.channelCount) { memset(ch[c], 0, Int(chunk) * MemoryLayout<Float>.size) }
+                }
+                let host = AVAudioTime.hostTime(forSeconds: startSec + Double(sent) / 48_000)
+                let when = AVAudioTime(hostTime: host, sampleTime: sent, atRate: 48_000)
+                feed.yield(.pcm(buf, when, 2))
+                sent += Int64(chunk)
+            }
+            if due - sent > 48_000 { sent = due - due % Int64(chunk) }   // after a long stall, do not burst
+        }
+        t.resume()
+        silentTimer = t
     }
 
     /// A still screen gives no new frames; platforms then think the stream
@@ -530,7 +583,7 @@ final class LiveStreamer: @unchecked Sendable {
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "live.idle"))
         t.schedule(deadline: .now() + 0.5, repeating: 0.25)
         t.setEventHandler { [weak self] in
-            guard let self = self, let feed = self.feed else { return }
+            guard let self = self, self.feed != nil else { return }
             self.lock.lock()
             let idle = CFAbsoluteTimeGetCurrent() - self.lastFrameTime > 0.4
             let src = self.lastSource, orient = self.lastOrient
@@ -538,7 +591,7 @@ final class LiveStreamer: @unchecked Sendable {
             guard idle else { return }
             // re-draw (so new look / privacy / timer show even on a still screen)
             let pts = CMClockGetTime(CMClockGetHostTimeClock())
-            if let sb = self.compose(src, orient: orient, pts: pts) { feed.yield((sb, 0)) }
+            _ = self.compose(src, orient: orient, pts: pts)
         }
         t.resume()
         idleTimer = t

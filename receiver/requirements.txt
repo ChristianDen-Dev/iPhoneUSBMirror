@@ -1,6 +1,6 @@
 # Windows receiver dependencies (tested on Python 3.14.8, 64-bit)
 pymobiledevice3==11.66.1
-av==19.0.2
+av==19.0.1   # 19.0.2 format.pyd is blocked by Windows Smart App Control
 numpy==2.5.5
 pygame-ce==2.5.8
 sounddevice==0.5.6

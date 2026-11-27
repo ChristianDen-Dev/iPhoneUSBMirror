@@ -34,3 +34,6 @@ secrets*
 Thumbs.db
 desktop.ini
 .vscode/
+
+# ---- Receiver local settings ----
+receiver/settings.json

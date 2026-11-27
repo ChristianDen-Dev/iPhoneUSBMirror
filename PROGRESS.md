@@ -110,6 +110,15 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - A/B test (same session, alternating): separate channel vs main channel → identical (jitter 28–45 ms, sound≈video arrival). Channel kept (harmless, protects against big keyframes). `MIRROR_AUDIO_CHANNEL=0` disables it for tests.
 - Laptop part now: WASAPI shared 22 ms (driver floor; exclusive mode would hide sound from OBS/TikTok Desktop Audio → not used) + adaptive buffer ~30–40 ms ≈ **55–60 ms** (was ~200 ms). Remaining delay vs phone speaker is ReplayKit's own.
 
+## Stream sound routing + iPhone mic (2026-11-28)
+- User approved installing **VB-Audio Virtual Cable** (Pack46, signed by Vincent Burel). Installer made "CABLE Input" the Windows default speaker → restored Realtek with `receiver	ools\set_default_speaker.ps1`; the app now auto-restores it at start.
+- Own virtual sound device inside our app is not possible without a Microsoft-signed kernel driver (paid EV cert) → VB-Cable is the practical way.
+- `AudioRouter`: game sound → **CABLE Input** (stream, always 100 %) + **laptop speakers** (own volume, M = off). Laptop mute never mutes the stream.
+- TikTok LIVE Studio / OBS: Desktop audio = CABLE Input. Mic = their own mic source, OR:
+- **iPhone mic option** (iPhone build run 46046741868): mic button shown in the Start Broadcast sheet; packet type 7; mixed into the stream output only (never laptop speakers). N = mute, loudness 0-300 % in the menu. Verified by recording CABLE Output: game + mic tones both present with laptop muted.
+- UI: toolbar level meter + mic button (when the iPhone mic is on), Sound panel (A), status bar shows stream/mic/laptop state.
+- Recordings (F9) contain game sound only (not the mic) for now.
+
 ## Next
 - Phase 8b: OBS / TikTok LIVE Studio capture guide, 30-min stability test.
 - Phase 9: docs.

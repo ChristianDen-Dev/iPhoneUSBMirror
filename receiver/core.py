@@ -32,7 +32,7 @@ SOCKET_TIMEOUT_S = 3.0          # iPhone sends a heartbeat every 1 s
 MAX_PAYLOAD = 8 * 1024 * 1024   # sanity limit for one packet
 
 HEADER = struct.Struct(">BBQI")  # type, flags, timestamp_us, length
-T_VIDEO_CONFIG, T_VIDEO_FRAME, T_AUDIO_PCM, T_ORIENTATION, T_HEARTBEAT, T_INFO = 1, 2, 3, 4, 5, 6
+T_VIDEO_CONFIG, T_VIDEO_FRAME, T_AUDIO_PCM, T_ORIENTATION, T_HEARTBEAT, T_INFO, T_AUDIO_MIC = 1, 2, 3, 4, 5, 6, 7
 FLAG_KEYFRAME = 0x01
 
 # CGImagePropertyOrientation -> number of 90 deg counter-clockwise turns
@@ -384,6 +384,8 @@ class AudioChannel(threading.Thread):
             self.s.bytes_total += HEADER.size + length
             if ptype == T_AUDIO_PCM:
                 self.rx.handle_audio(ts_us, bytes(payload))
+            elif ptype == T_AUDIO_MIC:
+                self.rx.handle_mic(ts_us, bytes(payload))
 
 
 # --------------------------------------------------------------------------
@@ -501,6 +503,8 @@ class Receiver(threading.Thread):
                     self.s.orientation = payload[0]
             elif ptype == T_AUDIO_PCM:
                 self.handle_audio(ts_us, bytes(payload))
+            elif ptype == T_AUDIO_MIC:
+                self.handle_mic(ts_us, bytes(payload))
             elif ptype == T_INFO:
                 text = bytes(payload).decode("utf-8", "replace")
                 self.s.info = text
@@ -520,6 +524,12 @@ class Receiver(threading.Thread):
         rec = self.s.recorder
         if rec is not None and rec.active:
             rec.audio(ts_us, pcm)
+
+    def handle_mic(self, ts_us, pcm):
+        """iPhone microphone: only to the stream (never the laptop speakers)."""
+        audio = self.s.audio
+        if audio is not None and hasattr(audio, "feed_mic"):
+            audio.feed_mic(ts_us, pcm)
 
     # ---- output -----------------------------------------------------------
     def present(self, frame, k):

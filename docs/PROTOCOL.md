@@ -65,3 +65,10 @@ connection, so sound never waits behind large video frames on the phone. The
 receiver connects it after the main connection is up; if the port is closed
 (older app), sound keeps arriving on the main connection (2345). Heartbeats
 (type 5) are also sent there every second.
+
+## AUDIO_MIC (type 7)
+
+iPhone microphone, same format as AUDIO_PCM (48 kHz s16le stereo). Only sent
+when the Microphone toggle in the Start Broadcast sheet was ON. Sent on the
+sound-only channel when connected (else the main one). The receiver mixes it
+into the STREAM output (VB-Audio cable) only, never the laptop speakers.

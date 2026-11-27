@@ -81,6 +81,10 @@ class AudioPlayer:
         self.last_error = ""
         self.device_name = ""
         self._last_open_try = 0.0
+        # second sound mixed on top (the iPhone mic, stream output only)
+        self.mix = bytearray()
+        self.mix_primed = False
+        self.mix_gain = 1.0
 
     # ---- called from the network thread -----------------------------------
     def feed(self, ts_us, pcm: bytes):
@@ -97,10 +101,27 @@ class AudioPlayer:
                 self.target_ms = max(TARGET_MS, self.target_ms - 5)
                 self._last_underrun = now
 
+    def feed_mix(self, pcm: bytes):
+        """Sound to mix on top of the main sound (iPhone mic). Small buffer,
+        no delay build-up: keeps at most 150 ms, then trims to the newest 60 ms."""
+        if self.stream is None:
+            self._open()
+        with self.lock:
+            self.mix += pcm
+            if len(self.mix) > ms_to_bytes(150):
+                del self.mix[: len(self.mix) - ms_to_bytes(60)]
+
+    def reset_mix(self):
+        with self.lock:
+            self.mix.clear()
+            self.mix_primed = False
+
     def reset(self):
         """Call when the iPhone disconnects."""
         with self.lock:
             self.buf.clear()
+            self.mix.clear()
+            self.mix_primed = False
             self.started = False
 
     # ---- called from the window -------------------------------------------
@@ -216,12 +237,23 @@ class AudioPlayer:
                 self._last_underrun = time.monotonic()
             if take_frames != frames:
                 self.corrections += 1
+            mixchunk = None
+            if self.mix:
+                if not self.mix_primed and len(self.mix) >= ms_to_bytes(30):
+                    self.mix_primed = True                   # small cushion before mixing
+                if self.mix_primed:
+                    if len(self.mix) >= need:
+                        mixchunk = bytes(self.mix[:need])
+                        del self.mix[:need]
+                    else:
+                        self.mix.clear()
+                        self.mix_primed = False
         vol = 0.0 if self.muted else self.volume
 
-        if take_frames == frames and vol == 1.0:
+        if take_frames == frames and vol == 1.0 and mixchunk is None:
             outdata[:] = chunk                               # fast path: untouched
             return
-        if vol == 0.0:
+        if vol == 0.0 and mixchunk is None:
             outdata[:] = b"\x00" * need
             return
         a = np.frombuffer(chunk, dtype=np.int16).reshape(-1, CHANNELS).astype(np.float32)
@@ -232,6 +264,8 @@ class AudioPlayer:
             a = np.stack([np.interp(x, xp, a[:, 0]), np.interp(x, xp, a[:, 1])], axis=1)
         if vol != 1.0:
             a *= vol
+        if mixchunk is not None:
+            a = a + np.frombuffer(mixchunk, dtype=np.int16).reshape(-1, CHANNELS).astype(np.float32) * self.mix_gain
         outdata[:] = np.clip(a, -32768, 32767).astype(np.int16).tobytes()
 
 
@@ -252,6 +286,12 @@ class AudioRouter:
         self.stream = AudioPlayer(STREAM_DEVICE, "stream")
         self.cable_name = (find_output(STREAM_DEVICE) or (None, ""))[1]
         self.stream_enabled = stream_enabled
+        self.mic_to_stream = True  # mix the iPhone mic into the stream (never the laptop)
+        self.mic_muted = False
+        self.mic_last = 0.0        # time the last mic piece arrived
+        self.mic_level = 0.0
+        self._mic_acc = 0.0
+        self._mic_t = time.monotonic()
         self.level = 0.0          # loudest sample of the last ~0.1 s (0..1)
         self._acc = 0.0
         self._level_t = time.monotonic()
@@ -270,6 +310,22 @@ class AudioRouter:
         now = time.monotonic()
         if now - self._level_t >= 0.1:
             self.level, self._acc, self._level_t = self._acc, 0.0, now
+
+    @property
+    def mic_active(self):
+        """True while the iPhone sends its microphone."""
+        return time.monotonic() - self.mic_last < 1.5
+
+    def feed_mic(self, ts_us, pcm):
+        now = time.monotonic()
+        self.mic_last = now
+        a = np.frombuffer(pcm, dtype=np.int16)
+        if a.size:
+            self._mic_acc = max(self._mic_acc, float(np.abs(a).max()) / 32768.0)
+        if now - self._mic_t >= 0.1:
+            self.mic_level, self._mic_acc, self._mic_t = self._mic_acc, 0.0, now
+        if self.cable_ok and self.mic_to_stream and not self.mic_muted:
+            self.stream.feed_mix(pcm)
 
     def set_stream_enabled(self, on):
         self.stream_enabled = on

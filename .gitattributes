@@ -1,0 +1,11 @@
+# Normalize line endings. iOS / CI files must stay LF for the macOS build.
+* text=auto
+*.swift text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.plist text eol=lf
+*.entitlements text eol=lf
+*.sh    text eol=lf
+*.md    text eol=lf
+*.py    text eol=lf
+*.bat   text eol=crlf

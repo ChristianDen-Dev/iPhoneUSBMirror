@@ -1,0 +1,75 @@
+# Builds an UNSIGNED iPhoneUSBMirror.ipa on a free macOS runner.
+# Sideloadly signs it on Windows with your own Apple ID.
+name: Build iOS (unsigned .ipa)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/build-ios.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build (no code signing)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project iPhoneUSBMirror.xcodeproj \
+            -scheme iPhoneUSBMirror \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            | tee "$RUNNER_TEMP/xcodebuild.log" | grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "BUILD SUCCEEDED" "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Package unsigned .ipa
+        run: |
+          set -e
+          APP="$RUNNER_TEMP/dd/Build/Products/Release-iphoneos/iPhoneUSBMirror.app"
+          test -d "$APP"
+          test -d "$APP/PlugIns/MirrorBroadcast.appex"   # the extension must be inside
+          echo "--- app contents"; ls -la "$APP" "$APP/PlugIns"
+          echo "--- extension Info.plist"; plutil -p "$APP/PlugIns/MirrorBroadcast.appex/Info.plist"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry iPhoneUSBMirror.ipa Payload
+          ls -la iPhoneUSBMirror.ipa
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iPhoneUSBMirror-ipa
+          path: ${{ runner.temp }}/ipa/iPhoneUSBMirror.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log

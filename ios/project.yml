@@ -1,0 +1,81 @@
+# XcodeGen spec: `xcodegen generate` (run on the macOS CI runner) creates
+# iPhoneUSBMirror.xcodeproj from this file. Never commit the .xcodeproj.
+name: iPhoneUSBMirror
+
+options:
+  bundleIdPrefix: com.usbmirror
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"            # Swift 5 mode (no Swift 6 strict-concurrency errors)
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"     # iPhone only
+    GENERATE_INFOPLIST_FILE: NO
+    ENABLE_BITCODE: NO
+    CODE_SIGN_STYLE: Manual         # unsigned CI build; Sideloadly signs it later
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  # ---------------------------------------------------------------- host app
+  iPhoneUSBMirror:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.usbmirror.iphoneusbmirror
+        PRODUCT_NAME: iPhoneUSBMirror
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: en
+        CFBundleDisplayName: USB Mirror
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [arm64]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIApplicationSupportsIndirectInputEvents: true
+    dependencies:
+      - target: MirrorBroadcast
+        embed: true                 # copied into iPhoneUSBMirror.app/PlugIns/
+    scheme: {}                      # shared scheme "iPhoneUSBMirror" for xcodebuild
+
+  # ------------------------------------------- Broadcast Upload Extension
+  MirrorBroadcast:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: MirrorBroadcast
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.usbmirror.iphoneusbmirror.MirrorBroadcast
+        PRODUCT_NAME: MirrorBroadcast
+        SKIP_INSTALL: YES
+    info:
+      path: MirrorBroadcast/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: en
+        CFBundleDisplayName: iPhone USB Mirror   # name shown in the broadcast list
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundlePackageType: XPC!
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer

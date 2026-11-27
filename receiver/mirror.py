@@ -23,6 +23,7 @@ Protocol: see docs/PROTOCOL.md
 
 import argparse
 import asyncio
+import collections
 import ctypes
 import json
 import os
@@ -34,6 +35,7 @@ import time
 from fractions import Fraction
 
 import av
+from av.codec.hwaccel import HWAccel
 import numpy as np
 import pygame
 from pymobiledevice3 import usbmux
@@ -94,6 +96,11 @@ class Shared:
         # stats
         self.bytes_total = 0
         self.frames_decoded = 0
+        self.frames_skipped = 0      # decoded but not drawn (a newer one was waiting)
+        self.render_ms = 0.0
+        self.window_ms = 0.0           # main thread: blit + flip time
+        self.decoder_name = ""
+        self.frame_ready = threading.Event()   # wakes the window loop on a new frame
         self.video_size = (0, 0)
         self.decode_ms = 0.0
         self.info = ""               # last diagnostic text from the iPhone
@@ -113,7 +120,99 @@ class Shared:
 
 
 # --------------------------------------------------------------------------
-# Network + decode thread
+# Video thread: decode every packet (H.264 needs them all), but only draw
+# the NEWEST frame when it falls behind -> always low delay, never a backlog.
+# --------------------------------------------------------------------------
+class VideoWorker(threading.Thread):
+    MAX_BACKLOG = 90            # packets (~1.5 s); beyond this: drop all, wait for keyframe
+    MIN_DRAW_INTERVAL_S = 0.1   # even when behind, draw at least 10x per second
+
+    def __init__(self, receiver):
+        super().__init__(daemon=True, name="video")
+        self.rx = receiver
+        self.s = receiver.s
+        self.cv = threading.Condition()
+        self.q = collections.deque()
+        self._reset = True
+
+    def reset(self):
+        """New connection: drop queued packets, start a fresh decoder."""
+        with self.cv:
+            self.q.clear()
+            self._reset = True
+
+    def submit(self, data, is_key, ts_us):
+        with self.cv:
+            if len(self.q) >= self.MAX_BACKLOG:
+                print("[mirror] video backlog too big - skipping ahead to next keyframe", flush=True)
+                self.q.clear()
+                self._reset = True
+            self.q.append((data, is_key, ts_us))
+            self.cv.notify()
+
+    def run(self):
+        decoder = None
+        need_keyframe = True
+        last_draw = 0.0
+        while self.s.running:
+            with self.cv:
+                while not self.q and self.s.running:
+                    self.cv.wait(0.5)
+                if not self.s.running:
+                    break
+                if self._reset:
+                    self._reset = False
+                    decoder = self.make_decoder()
+                    need_keyframe = True
+                data, is_key, ts_us = self.q.popleft()
+
+            if need_keyframe and not is_key:
+                continue                            # wait for a clean start
+            t0 = time.perf_counter()
+            try:
+                frames = decoder.decode(av.Packet(data))
+            except av.FFmpegError as e:
+                print(f"[mirror] decode error: {e} - waiting for next keyframe", flush=True)
+                need_keyframe = True
+                continue
+            t1 = time.perf_counter()
+            need_keyframe = False
+            self.s.last_video_ts = ts_us
+            if frames:
+                with self.cv:
+                    behind = len(self.q)
+                if behind == 0 or t1 - last_draw >= self.MIN_DRAW_INTERVAL_S:
+                    self.rx.present(frames[-1])
+                    last_draw = t1
+                    self.s.render_ms = (time.perf_counter() - t1) * 1000
+                else:
+                    self.s.frames_skipped += 1      # a newer frame is already waiting
+            self.s.decode_ms = (t1 - t0) * 1000
+
+    # GPU decoders first (RTX = cuda, any GPU = d3d11va), CPU as the last resort.
+    HW_DEVICES = ("cuda", "d3d11va")
+
+    def make_decoder(self):
+        for dev in self.HW_DEVICES:
+            try:
+                ctx = av.CodecContext.create("h264", "r", hwaccel=HWAccel(device_type=dev,
+                                                                            allow_software_fallback=False))
+                if self.s.decoder_name != dev:
+                    print(f"[mirror] video decoder: GPU ({dev})", flush=True)
+                self.s.decoder_name = dev
+                return ctx
+            except Exception as e:
+                print(f"[mirror] GPU decoder {dev} not available: {e}", flush=True)
+        ctx = av.CodecContext.create("h264", "r")
+        ctx.thread_type = "SLICE"                   # slice threads add no delay
+        if self.s.decoder_name != "cpu":
+            print("[mirror] video decoder: CPU", flush=True)
+        self.s.decoder_name = "cpu"
+        return ctx
+
+
+# --------------------------------------------------------------------------
+# Network thread
 # --------------------------------------------------------------------------
 class Receiver(threading.Thread):
     # Enlarging more than this -> Lanczos + sharpening filter.
@@ -127,6 +226,8 @@ class Receiver(threading.Thread):
         self._graph = None
         self._graph_key = None
         self._pts = 0
+        self.video = VideoWorker(self)
+        self.video.start()
 
     # np.rot90-style k (CCW quarter turns) -> FFmpeg filters
     ROTATE_FILTERS = {0: [], 1: [("transpose", "cclock")], 2: [("hflip", None), ("vflip", None)],
@@ -203,6 +304,7 @@ class Receiver(threading.Thread):
                     sock.close()
                 except OSError:
                     pass
+                self.video.reset()
                 self.s.clear_frame()
                 if self.s.audio is not None:
                     self.s.audio.reset()
@@ -222,14 +324,17 @@ class Receiver(threading.Thread):
         return buf
 
     def stream(self, sock):
+        """Network loop: only reads packets and hands them out.
+        Audio is played immediately; video goes to the VideoWorker thread,
+        so a slow video frame can never delay the sound."""
         sock.setblocking(True)
         sock.settimeout(SOCKET_TIMEOUT_S)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # bigger socket buffer: absorbs 20-30 Mbps bursts (keyframes)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
 
-        decoder = av.CodecContext.create("h264", "r")
-        decoder.thread_type = "SLICE"    # slice threads add no delay (frame threads do)
+        self.video.reset()               # fresh decoder for each connection
         config = b""                     # Annex-B SPS+PPS
-        need_keyframe = True
 
         while self.s.running:
             ptype, flags, ts_us, length = HEADER.unpack(self.recv_exact(sock, HEADER.size))
@@ -248,21 +353,8 @@ class Receiver(threading.Thread):
                     config = new_config
             elif ptype == T_VIDEO_FRAME:
                 is_key = bool(flags & FLAG_KEYFRAME)
-                if need_keyframe and not is_key:
-                    continue                     # wait for a clean start
-                data = (config + payload) if is_key else payload
-                t0 = time.perf_counter()
-                try:
-                    frames = decoder.decode(av.Packet(bytes(data)))
-                except av.FFmpegError as e:
-                    print(f"[mirror] decode error: {e} - waiting for next keyframe")
-                    need_keyframe = True
-                    continue
-                need_keyframe = False
-                self.s.last_video_ts = ts_us
-                for frame in frames:
-                    self.present(frame)
-                self.s.decode_ms = (time.perf_counter() - t0) * 1000
+                data = (config + bytes(payload)) if is_key else bytes(payload)
+                self.video.submit(data, is_key, ts_us)
             elif ptype == T_ORIENTATION:
                 if length >= 1:
                     self.s.orientation = payload[0]
@@ -295,6 +387,7 @@ class Receiver(threading.Thread):
             self.s.frame_seq += 1
             self.s.frames_decoded += 1
             self.s.video_size = (rw, rh)
+        self.s.frame_ready.set()
 
 
 # --------------------------------------------------------------------------
@@ -396,6 +489,7 @@ def main():
     fps_frames, fps_value, fps_t = 0, 0.0, time.perf_counter()
     rate_bytes, rate_value = 0, 0.0
     log_tick = 0
+    last_win, last_status = None, None
 
     while shared.running:
         for event in pygame.event.get():
@@ -448,17 +542,24 @@ def main():
 
         with shared.lock:
             seq, arr, status = shared.frame_seq, shared.frame, shared.status
+        redraw = False
         if seq != last_seq:
             last_seq = seq
+            redraw = True
             if arr is None:
                 current = None
             else:
                 h, w = arr.shape[:2]
                 current = (pygame.image.frombuffer(arr, (w, h), "BGRA"), arr)
                 fps_frames += 1
+        # Redraw only when something changed: new frame, window change, status
+        # text, or stats overlay. Idle redraws just steal time from video.
+        if (win_w, win_h) != last_win or status != last_status or show_stats or current is None:
+            redraw = True
+        last_win, last_status = (win_w, win_h), status
 
-        screen.fill((0, 0, 0))
-        if current is not None:
+        t_draw = time.perf_counter()
+        if redraw and current is not None:
             surf = current[0]
             sw, sh = surf.get_size()
             # Window was resized since this frame was made -> quick rescale.
@@ -466,8 +567,11 @@ def main():
             if abs(scale - 1.0) > 0.01:
                 surf = pygame.transform.smoothscale(surf, (max(1, int(sw * scale)), max(1, int(sh * scale))))
                 sw, sh = surf.get_size()
+            if (sw, sh) != (win_w, win_h):
+                screen.fill((0, 0, 0))              # black bars only when needed
             screen.blit(surf, ((win_w - sw) // 2, (win_h - sh) // 2))
-        else:
+        elif redraw:
+            screen.fill((0, 0, 0))
             draw_text_center(screen, font, status)
 
         # Stats (hidden by default so they never show on stream)
@@ -483,7 +587,10 @@ def main():
                 vw, vh = shared.video_size
                 a = shared.audio
                 print(f"[mirror] {time.strftime('%H:%M:%S')} fps {fps_value:.1f} | {rate_value:.2f} Mbps | "
-                      f"video {vw}x{vh} | orient {shared.orientation} | decode {shared.decode_ms:.1f} ms | "
+                      f"video {vw}x{vh} | orient {shared.orientation} | "
+                      f"decode[{shared.decoder_name}] {shared.decode_ms:.1f} ms + draw {shared.render_ms:.1f} ms"
+                      f" + window {shared.window_ms:.1f} ms | "
+                      f"late frames skipped {shared.frames_skipped} | "
                       f"audio buf {a.buffered_ms:.0f} ms, underruns {a.underruns}, skips {a.skips}"
                       f"{' MUTED' if a.muted else ''}", flush=True)
         if show_stats:
@@ -505,8 +612,12 @@ def main():
                 screen.blit(t, (8, y))
                 y += t.get_height() + 2
 
-        pygame.display.flip()
-        clock.tick(120)
+        if redraw:
+            pygame.display.flip()
+            shared.window_ms = (time.perf_counter() - t_draw) * 1000
+        # Sleep until the video thread has a new frame (or 10 ms for key events).
+        shared.frame_ready.wait(0.010)
+        shared.frame_ready.clear()
 
     shared.audio.close()
     pygame.quit()

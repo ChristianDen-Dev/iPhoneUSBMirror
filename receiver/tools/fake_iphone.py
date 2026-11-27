@@ -27,7 +27,8 @@ import numpy as np
 
 HEADER = struct.Struct(">BBQI")
 T_VIDEO_CONFIG, T_VIDEO_FRAME, T_AUDIO_PCM, T_ORIENTATION, T_HEARTBEAT = 1, 2, 3, 4, 5
-W, H, FPS = 886, 1920, 60        # portrait buffer, like the iPhone 14 Pro Max downscaled
+W, H, FPS = 886, 1918, 60        # portrait buffer, as ReplayKit delivers on iPhone 14 Pro Max
+NOISE = np.random.default_rng(7).integers(0, 255, (200, 1918, 3), np.uint8)  # pre-made busy detail
 ROT_TO_PORTRAIT = {1: 0, 3: 2, 6: 3, 8: 1}  # np.rot90 k turning the upright image into the buffer
 
 
@@ -64,6 +65,10 @@ def make_upright_image(t, upright_w, upright_h):
     # moving white box
     x = int((t * 300) % (upright_w - 100))
     img[upright_h - 160:upright_h - 60, x:x + 100] = 255
+    # moving noise band: hard-to-compress detail, like a busy game scene
+    y0 = int((t * 200) % (upright_h - 200))
+    shift = int(t * 997) % NOISE.shape[1]
+    img[y0:y0 + 200, 60:] = np.roll(NOISE, shift, axis=1)[:, :upright_w - 60]
     return img
 
 
@@ -90,9 +95,9 @@ def stream(conn, args):
     enc.width, enc.height, enc.pix_fmt = W, H, "yuv420p"
     enc.time_base = Fraction(1, FPS)
     enc.framerate = Fraction(FPS, 1)
-    enc.bit_rate = 8_000_000
+    enc.bit_rate = args.bitrate
     enc.options = {"preset": "ultrafast", "tune": "zerolatency", "bframes": "0",
-                   "g": str(FPS), "profile": "main"}
+                   "g": str(FPS * 2), "profile": "high", "threads": "4"}
 
     k = ROT_TO_PORTRAIT[args.orient]
     upright_w, upright_h = (H, W) if k % 2 else (W, H)
@@ -141,4 +146,5 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=2345)
     ap.add_argument("--orient", type=int, default=6, choices=[1, 3, 6, 8])
     ap.add_argument("--no-audio", action="store_true")
+    ap.add_argument("--bitrate", type=int, default=20_000_000)
     serve(ap.parse_args())

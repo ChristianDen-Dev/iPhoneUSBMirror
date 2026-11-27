@@ -8,7 +8,9 @@ Window Capture.
 
 Game sound plays on the default Windows output device (OBS "Desktop Audio").
 
-Keys:  F11 fullscreen | Esc leave fullscreen | F1 stats overlay
+Keys:  F2  STREAM MODE: borderless window at the iPhone's exact pixel size
+           (1:1, no scaling) pinned top-left - best quality for OBS
+       F11 fullscreen | Esc leave fullscreen / stream mode | F1 stats overlay
        M  mute / unmute game sound
        S  sharpening on/off (used when the iPhone picture is enlarged)
        R  flip landscape 180 deg (if the game shows upside-down)
@@ -73,6 +75,7 @@ class Shared:
         self.orientation = 1
         self.flip_landscape = False
         self.sharpen = True          # unsharp mask when enlarging small frames
+        self.stream_mode = False     # F2: 1:1 borderless window for OBS
         # stats
         self.bytes_total = 0
         self.frames_decoded = 0
@@ -110,24 +113,40 @@ class Receiver(threading.Thread):
         self._graph_key = None
         self._pts = 0
 
-    def _scale_filter(self, frame, w, h):
-        """Lanczos scale + unsharp mask via an FFmpeg filter graph (cached)."""
-        key = (frame.width, frame.height, frame.format.name, w, h)
+    # np.rot90-style k (CCW quarter turns) -> FFmpeg filters
+    ROTATE_FILTERS = {0: [], 1: [("transpose", "cclock")], 2: [("hflip", None), ("vflip", None)],
+                      3: [("transpose", "clock")]}
+
+    def _render(self, frame, k, out_w, out_h):
+        """One FFmpeg filter graph does everything in C (fast):
+        rotate (in YUV) -> scale only if needed -> optional sharpen -> BGRA."""
+        rw, rh = (frame.height, frame.width) if k % 2 else (frame.width, frame.height)
+        upscale = out_w / rw
+        sharpen = self.s.sharpen and upscale > self.UPSCALE_SHARPEN_AT
+        key = (frame.width, frame.height, frame.format.name, k, out_w, out_h, sharpen)
         if key != self._graph_key:
             g = av.filter.Graph()
-            src = g.add_buffer(width=frame.width, height=frame.height,
-                               format=frame.format.name, time_base=Fraction(1, 1000))
-            scale = g.add("scale", f"{w}:{h}:flags=lanczos")
-            sharp = g.add("unsharp", self.UNSHARP)
-            fmt = g.add("format", "rgb24")
+            last = g.add_buffer(width=frame.width, height=frame.height,
+                                format=frame.format.name, time_base=Fraction(1, 1000))
+            chain = list(self.ROTATE_FILTERS[k])
+            if (out_w, out_h) != (rw, rh):   # 1:1 (stream mode) skips scaling entirely
+                flags = "lanczos" if upscale > 1.0 else "bilinear"
+                chain.append(("scale", f"{out_w}:{out_h}:flags={flags}"))
+            if sharpen:
+                chain.append(("unsharp", self.UNSHARP))
+            chain.append(("format", "bgra"))  # native 32-bit: fastest upload to the window
+            for name, arg in chain:
+                node = g.add(name, arg) if arg else g.add(name)
+                last.link_to(node)
+                last = node
             sink = g.add("buffersink")
-            src.link_to(scale); scale.link_to(sharp); sharp.link_to(fmt); fmt.link_to(sink)
+            last.link_to(sink)
             g.configure()
             self._graph, self._graph_key = g, key
         self._pts += 1
         frame.pts = self._pts
         self._graph.push(frame)
-        return self._graph.pull().to_ndarray()
+        return np.ascontiguousarray(self._graph.pull().to_ndarray())
 
     # ---- connection -------------------------------------------------------
     async def _usb_connect(self):
@@ -238,7 +257,7 @@ class Receiver(threading.Thread):
             # T_HEARTBEAT: nothing to do (it just keeps the timeout from firing)
 
     def present(self, frame):
-        """Scale + rotate the decoded frame to fit the window, then publish it."""
+        """Rotate + fit the decoded frame to the window, then publish it (BGRA)."""
         k = ROTATION_K.get(self.s.orientation, 0)
         if self.s.flip_landscape and k in (1, 3):
             k = (k + 2) % 4
@@ -246,27 +265,13 @@ class Receiver(threading.Thread):
         rw, rh = (fh, fw) if k % 2 else (fw, fh)        # size after rotation
         tw, th = self.s.target_size
         scale = min(tw / rw, th / rh)
-        ow, oh = max(2, int(rw * scale) & ~1), max(2, int(rh * scale) & ~1)
-        # size to ask swscale for (before rotation)
-        sw, sh = (oh, ow) if k % 2 else (ow, oh)
-        # Enlarging a small iPhone picture: Lanczos + sharpening keeps edges and
-        # text crisp. Same size / shrinking: plain bilinear is enough.
-        upscale = sw / fw
-        rgb = None
-        if self.s.sharpen and upscale > self.UPSCALE_SHARPEN_AT:
-            try:
-                rgb = self._scale_filter(frame, sw, sh)
-            except Exception as e:  # never let the filter break the stream
-                print(f"[mirror] sharpen filter failed, using plain scaling: {e}", flush=True)
-                self.s.sharpen = False
-        if rgb is None:
-            interp = "LANCZOS" if upscale > 1.0 else "BILINEAR"
-            rgb = frame.reformat(width=sw, height=sh, format="rgb24", interpolation=interp).to_ndarray()
-        # PyAV rows can be padded (and rot90 returns a view): pygame needs a
-        # tightly packed C-contiguous buffer.
-        rgb = np.ascontiguousarray(np.rot90(rgb, k) if k else rgb)
+        if abs(scale - 1.0) < 0.005:                      # 1:1 - keep every pixel
+            ow, oh = rw, rh
+        else:
+            ow, oh = max(2, int(rw * scale) & ~1), max(2, int(rh * scale) & ~1)
+        img = self._render(frame, k, ow, oh)
         with self.s.lock:
-            self.s.frame = rgb
+            self.s.frame = img
             self.s.frame_seq += 1
             self.s.frames_decoded += 1
             self.s.video_size = (rw, rh)
@@ -281,6 +286,7 @@ def load_settings(shared):
             data = json.load(f)
             shared.flip_landscape = bool(data.get("flip_landscape", False))
             shared.sharpen = bool(data.get("sharpen", True))
+            shared.stream_mode = bool(data.get("stream_mode", False))
     except (OSError, ValueError):
         pass
 
@@ -288,9 +294,32 @@ def load_settings(shared):
 def save_settings(shared):
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"flip_landscape": shared.flip_landscape, "sharpen": shared.sharpen}, f)
+            json.dump({"flip_landscape": shared.flip_landscape, "sharpen": shared.sharpen,
+                       "stream_mode": shared.stream_mode}, f)
     except OSError:
         pass
+
+
+def move_window_top_left():
+    """Pin the (borderless) window to the top-left corner of the main screen."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = pygame.display.get_wm_info()["window"]
+        SWP_NOSIZE, SWP_NOZORDER = 0x0001, 0x0004
+        ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER)
+    except Exception:
+        pass
+
+
+def stream_mode_size(video_size, desktop_size):
+    """Exact video size (1:1); only shrunk if it doesn't fit on the screen."""
+    vw, vh = video_size
+    dw, dh = desktop_size
+    if vw <= 0 or vh <= 0:
+        return (1918, 886)  # landscape iPhone default until the first frame
+    scale = min(1.0, dw / vw, dh / vh)
+    return (max(2, int(vw * scale)), max(2, int(vh * scale)))
 
 
 def draw_text_center(screen, font, text, color=(200, 200, 200)):
@@ -329,9 +358,11 @@ def main():
 
     pygame.init()
     pygame.display.set_caption(WINDOW_TITLE)
+    desktop_size = pygame.display.get_desktop_sizes()[0]
     windowed_size = (1280, 720)
     screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
     fullscreen = False
+    stream_size = None           # current stream-mode window size
     font = pygame.font.SysFont("segoeui", 26)
     small = pygame.font.SysFont("consolas", 16)
     clock = pygame.time.Clock()
@@ -361,6 +392,14 @@ def main():
                 elif event.key == pygame.K_ESCAPE and fullscreen:
                     fullscreen = False
                     screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
+                elif event.key == pygame.K_F2 or (event.key == pygame.K_ESCAPE and shared.stream_mode):
+                    shared.stream_mode = not shared.stream_mode if event.key == pygame.K_F2 else False
+                    save_settings(shared)
+                    fullscreen = False
+                    stream_size = None
+                    if not shared.stream_mode:
+                        screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
+                    print(f"[mirror] stream mode {'on' if shared.stream_mode else 'off'}", flush=True)
                 elif event.key == pygame.K_F1:
                     show_stats = not show_stats
                 elif event.key == pygame.K_m:
@@ -374,6 +413,16 @@ def main():
                     shared.flip_landscape = not shared.flip_landscape
                     save_settings(shared)
 
+        # Stream mode: keep the borderless window at the video's exact size.
+        if shared.stream_mode and not fullscreen:
+            want = stream_mode_size(shared.video_size, desktop_size)
+            if want != stream_size:
+                if stream_size is None and screen.get_flags() & pygame.RESIZABLE:
+                    windowed_size = screen.get_size()
+                screen = pygame.display.set_mode(want, pygame.NOFRAME)
+                move_window_top_left()
+                stream_size = want
+
         win_w, win_h = screen.get_size()
         shared.target_size = (win_w, win_h)
 
@@ -385,7 +434,7 @@ def main():
                 current = None
             else:
                 h, w = arr.shape[:2]
-                current = (pygame.image.frombuffer(arr, (w, h), "RGB"), arr)
+                current = (pygame.image.frombuffer(arr, (w, h), "BGRA"), arr)
                 fps_frames += 1
 
         screen.fill((0, 0, 0))
@@ -395,7 +444,7 @@ def main():
             # Window was resized since this frame was made -> quick rescale.
             scale = min(win_w / sw, win_h / sh)
             if abs(scale - 1.0) > 0.01:
-                surf = pygame.transform.scale(surf, (max(1, int(sw * scale)), max(1, int(sh * scale))))
+                surf = pygame.transform.smoothscale(surf, (max(1, int(sw * scale)), max(1, int(sh * scale))))
                 sw, sh = surf.get_size()
             screen.blit(surf, ((win_w - sw) // 2, (win_h - sh) // 2))
         else:
@@ -428,7 +477,7 @@ def main():
                 f"A-V {(shared.last_audio_ts - shared.last_video_ts) / 1000:+.0f} ms",
                 f"iPhone: {shared.info or '-'}",
                 f"sharpen {'on' if shared.sharpen else 'off'}",
-                "F11 fullscreen  M mute  S sharpen  R flip  F1 hide",
+                "F2 stream mode  F11 fullscreen  M mute  S sharpen  R flip  F1 hide",
             ]
             y = 8
             for line in lines:

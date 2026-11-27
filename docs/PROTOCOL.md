@@ -26,6 +26,7 @@ Every packet = 14-byte header + payload. **All header integers are big-endian.**
 | 3 | `AUDIO_PCM` | Raw PCM: **48 kHz, signed 16-bit little-endian, 2 channels, interleaved** (4 bytes per frame). |
 | 4 | `ORIENTATION` | `u8` = `CGImagePropertyOrientation` raw value from `RPVideoSampleOrientationKey`. Sent when it changes and when a client connects. |
 | 5 | `HEARTBEAT` | empty, once per second |
+| 6 | `INFO` | UTF-8 diagnostic text (source buffer size/format, encode size, memory footprint, thermal state, Low Power Mode). Sent when the encoder is (re)created and every ~5 s. Receivers may ignore it. |
 
 ### Orientation values
 
@@ -36,12 +37,12 @@ The receiver rotates it for display:
 |---|---|---|
 | 1 | up | none |
 | 3 | down | 180° |
-| 6 | right | 90° clockwise |
-| 8 | left | 90° counter-clockwise |
+| 6 | right | 90° counter-clockwise |
+| 8 | left | 90° clockwise |
 | 2,4,5,7 | mirrored variants | (not expected from ReplayKit; treated like 1/3/6/8 without mirroring) |
 
-If landscape shows up upside-down, swap the 6/8 rotation directions in the receiver.
-That is the only orientation detail that can only be confirmed on the real device.
+The 6/8 directions were confirmed on a real iPhone 14 Pro Max (Mobile Legends).
+The receiver's `R` key can still flip landscape 180° if ever needed.
 
 ## Behaviour
 

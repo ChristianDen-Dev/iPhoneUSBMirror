@@ -37,14 +37,15 @@ SOCKET_TIMEOUT_S = 3.0          # iPhone sends a heartbeat every 1 s
 MAX_PAYLOAD = 8 * 1024 * 1024   # sanity limit for one packet
 
 HEADER = struct.Struct(">BBQI")  # type, flags, timestamp_us, length
-T_VIDEO_CONFIG, T_VIDEO_FRAME, T_AUDIO_PCM, T_ORIENTATION, T_HEARTBEAT = 1, 2, 3, 4, 5
+T_VIDEO_CONFIG, T_VIDEO_FRAME, T_AUDIO_PCM, T_ORIENTATION, T_HEARTBEAT, T_INFO = 1, 2, 3, 4, 5, 6
 FLAG_KEYFRAME = 0x01
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
 # CGImagePropertyOrientation -> number of 90 deg counter-clockwise turns (np.rot90 k)
-#   1 up: 0 | 3 down: 180 | 6 right: 90 CW (= 3 CCW) | 8 left: 90 CCW
-ROTATION_K = {1: 0, 2: 0, 3: 2, 4: 2, 5: 1, 6: 3, 7: 3, 8: 1}
+#   1 up: 0 | 3 down: 180 | 6: 90 CCW | 8: 90 CW (= 3 CCW)
+# (6/8 directions confirmed on a real iPhone 14 Pro Max with Mobile Legends)
+ROTATION_K = {1: 0, 2: 0, 3: 2, 4: 2, 5: 3, 6: 1, 7: 1, 8: 3}
 
 
 class NoDeviceError(Exception):
@@ -69,6 +70,7 @@ class Shared:
         self.frames_decoded = 0
         self.video_size = (0, 0)
         self.decode_ms = 0.0
+        self.info = ""               # last diagnostic text from the iPhone
         # audio hook (Phase 7)
         self.on_audio = None
 
@@ -121,6 +123,7 @@ class Receiver(threading.Thread):
                 continue
 
             self.s.set_status("Connected. Waiting for video...")
+            print(f"[mirror] {time.strftime('%H:%M:%S')} connected to iPhone", flush=True)
             try:
                 self.stream(sock)
             except Exception as e:  # disconnect, timeout, protocol error
@@ -189,6 +192,10 @@ class Receiver(threading.Thread):
                 cb = self.s.on_audio
                 if cb is not None:
                     cb(ts_us, bytes(payload))
+            elif ptype == T_INFO:
+                text = bytes(payload).decode("utf-8", "replace")
+                self.s.info = text
+                print(f"[iphone] {time.strftime('%H:%M:%S')} {text}", flush=True)
             # T_HEARTBEAT: nothing to do (it just keeps the timeout from firing)
 
     def present(self, frame):
@@ -283,6 +290,7 @@ def main():
     current = None               # (surface, numpy array kept alive)
     fps_frames, fps_value, fps_t = 0, 0.0, time.perf_counter()
     rate_bytes, rate_value = 0, 0.0
+    log_tick = 0
 
     while shared.running:
         for event in pygame.event.get():
@@ -340,12 +348,19 @@ def main():
             rate_value = (total - rate_bytes) * 8 / (now - fps_t) / 1e6
             rate_bytes = total
             fps_frames, fps_t = 0, now
+            log_tick += 1
+            if current is not None and log_tick % 5 == 0:   # console log every ~5 s
+                vw, vh = shared.video_size
+                print(f"[mirror] {time.strftime('%H:%M:%S')} fps {fps_value:.1f} | {rate_value:.2f} Mbps | "
+                      f"video {vw}x{vh} | orient {shared.orientation} | decode {shared.decode_ms:.1f} ms",
+                      flush=True)
         if show_stats:
             vw, vh = shared.video_size
             lines = [
                 f"FPS {fps_value:5.1f}   {rate_value:5.2f} Mbps",
                 f"video {vw}x{vh}  orient {shared.orientation}  flip {'on' if shared.flip_landscape else 'off'}",
                 f"decode {shared.decode_ms:4.1f} ms   window {win_w}x{win_h}",
+                f"iPhone: {shared.info or '-'}",
                 "F11 fullscreen  R flip  F1 hide",
             ]
             y = 8

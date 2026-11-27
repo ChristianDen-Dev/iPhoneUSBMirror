@@ -28,7 +28,7 @@ import numpy as np
 HEADER = struct.Struct(">BBQI")
 T_VIDEO_CONFIG, T_VIDEO_FRAME, T_AUDIO_PCM, T_ORIENTATION, T_HEARTBEAT = 1, 2, 3, 4, 5
 W, H, FPS = 886, 1920, 60        # portrait buffer, like the iPhone 14 Pro Max downscaled
-ROT_TO_PORTRAIT = {1: 0, 3: 2, 6: 1, 8: 3}  # np.rot90 k turning the upright image into the buffer
+ROT_TO_PORTRAIT = {1: 0, 3: 2, 6: 3, 8: 1}  # np.rot90 k turning the upright image into the buffer
 
 
 def packet(ptype, ts_us, payload=b"", flags=0):

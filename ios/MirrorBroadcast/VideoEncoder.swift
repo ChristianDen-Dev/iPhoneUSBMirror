@@ -44,8 +44,8 @@ final class VideoEncoder {
         // Keep aspect ratio, long side <= 1920, even dimensions.
         let longSide = max(sourceWidth, sourceHeight)
         let scale = longSide > Self.maxLongSide ? Double(Self.maxLongSide) / Double(longSide) : 1.0
-        width = max(2, Int((Double(sourceWidth) * scale) / 2) * 2)
-        height = max(2, Int((Double(sourceHeight) * scale) / 2) * 2)
+        width = max(2, Int((Double(sourceWidth) * scale / 2).rounded()) * 2)
+        height = max(2, Int((Double(sourceHeight) * scale / 2).rounded()) * 2)
 
         let attrs: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,

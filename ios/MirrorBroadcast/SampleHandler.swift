@@ -16,6 +16,9 @@ class SampleHandler: RPBroadcastSampleHandler {
     private let stateLock = NSLock()
     private var lastOrientation: UInt8 = 0
     private var orientationDirty = true   // resend orientation (e.g. new client)
+    private var sourceDescription = "none" // last ReplayKit buffer size/format (diagnostics)
+    private var encoderDescription = "none"
+    private var tickCount = 0
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         server.onClientConnected = { [weak self] in
@@ -26,6 +29,8 @@ class SampleHandler: RPBroadcastSampleHandler {
         server.onTick = { [weak self] in
             guard let self = self, self.server.isClientConnected else { return }
             self.encoder?.repeatLastFrameIfIdle()
+            self.tickCount += 1
+            if self.tickCount % 5 == 1 { self.sendInfo() }   // every ~5 s
         }
         server.start()
     }
@@ -71,6 +76,11 @@ class SampleHandler: RPBroadcastSampleHandler {
             encoder?.invalidate()
             encoder = VideoEncoder(sourceWidth: w, sourceHeight: h)
             encoder?.onPacket = { [weak self] packet in self?.server.send(packet, isVideo: true) }
+            stateLock.lock()
+            sourceDescription = "\(w)x\(h) \(fourCC(CVPixelBufferGetPixelFormatType(pixelBuffer)))"
+            encoderDescription = encoder.map { "\($0.width)x\($0.height)" } ?? "FAILED"
+            stateLock.unlock()
+            sendInfo()
         }
         guard let enc = encoder else { return }
 
@@ -90,6 +100,26 @@ class SampleHandler: RPBroadcastSampleHandler {
             return
         }
         server.send(Packet.make(.orientation, timestampUs: microseconds(pts), payload: Data([value])), isVideo: false)
+    }
+
+    // MARK: diagnostics
+
+    private func sendInfo() {
+        stateLock.lock()
+        let src = sourceDescription, enc = encoderDescription, orient = lastOrientation
+        stateLock.unlock()
+        let thermal: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: thermal = "nominal"
+        case .fair: thermal = "fair"
+        case .serious: thermal = "SERIOUS"
+        case .critical: thermal = "CRITICAL"
+        @unknown default: thermal = "?"
+        }
+        let text = String(format: "source %@ -> encode %@ | orient %d | mem %.1f MB | thermal %@ | lowPower %@",
+                          src, enc, Int(orient), memoryFootprintMB(), thermal,
+                          ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off")
+        server.send(Packet.make(.info, timestampUs: 0, payload: Data(text.utf8)), isVideo: false)
     }
 
     // MARK: audio

@@ -1,131 +1,242 @@
-// Host app: one screen with the system "Start Broadcast" button.
-// All the real work happens in the MirrorBroadcast extension.
+// Host app. Home screen with three ways to use the broadcast:
+//   USB      - mirror to the Windows laptop with the cable (lowest delay)
+//   Wi-Fi    - mirror to the laptop without a cable
+//   Go Live  - the phone streams by itself to Facebook / YouTube / TikTok
+// The real work happens in the MirrorBroadcast extension.
 
 import SwiftUI
-import ReplayKit
-import Network
 
 @main
 struct MirrorApp: App {
+    @StateObject private var model = AppModel()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ZStack {
+                HomeView()
+                // comments tab on the right edge (Go Live only)
+                if model.armedMode == .live || model.liveConnected {
+                    CommentsOverlay().transition(.move(edge: .trailing))
+                }
+            }
+                .environmentObject(model)
+                .preferredColorScheme(.dark)
+                .onAppear { model.start() }
         }
     }
 }
 
-struct ContentView: View {
-    @StateObject private var net = WiFiInfo()
+struct HomeView: View {
+    @EnvironmentObject var model: AppModel
+    @State private var path: [MirrorMode] = []
 
     var body: some View {
-        VStack(spacing: 24) {
-            Text("iPhone USB Mirror")
-                .font(.largeTitle.bold())
-
-            BroadcastPicker()
-                .frame(width: 140, height: 140)
-                .background(Circle().fill(Color.red.opacity(0.15)))
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("1. USB: plug the iPhone into the laptop. Wi-Fi: same Wi-Fi as the laptop (or the laptop on this iPhone's Hotspot).")
-                Text("2. Start the receiver on Windows.")
-                Text("3. Tap the button above → choose **iPhone USB Mirror** → **Start Broadcast**.")
-                Text("4. Open your game. To stop, tap the red status pill / Control Center.")
+        NavigationStack(path: $path) {
+            ZStack {
+                GlowBackground(colors: Theme.colors(model.armedMode))
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        header
+                        if model.liveConnected && model.live.state != "ended" {
+                            LiveMiniBar(status: model.live).onTapGesture { path.append(.live) }
+                        }
+                        ModeCard(mode: .usb, title: "USB", subtitle: "Mirror to your laptop with the cable",
+                                 symbol: "cable.connector", badge: "Lowest delay", armed: model.armedMode == .usb) { path.append(.usb) }
+                        ModeCard(mode: .wifi, title: "Wi-Fi", subtitle: "Mirror to your laptop, no cable",
+                                 symbol: "wifi", badge: "Wireless", armed: model.armedMode == .wifi) { path.append(.wifi) }
+                        ModeCard(mode: .live, title: "Go Live", subtitle: "Stream from this iPhone to Facebook, YouTube...",
+                                 symbol: "dot.radiowaves.left.and.right", badge: "No PC needed",
+                                 armed: model.armedMode == .live) { path.append(.live) }
+                        footer
+                    }
+                    .padding(20)
+                }
             }
-            .font(.body)
-            .padding(.horizontal, 24)
-
-            VStack(spacing: 4) {
-                Text("Wi-Fi address of this iPhone").font(.footnote).foregroundColor(.secondary)
-                Text(net.addresses.isEmpty ? "not on Wi-Fi" : net.addresses.joined(separator: "   "))
-                    .font(.title3.monospacedDigit().bold())
-                Text("The receiver finds it by itself; type it only if it asks.")
-                    .font(.footnote).foregroundColor(.secondary)
+            .navigationDestination(for: MirrorMode.self) { mode in
+                switch mode {
+                case .usb: MirrorModeView(mode: .usb)
+                case .wifi: MirrorModeView(mode: .wifi)
+                case .live: GoLiveView()
+                }
             }
-
-            Text("Mic: turn on Microphone in the broadcast sheet only if you want the iPhone mic.")
-                .font(.footnote)
-                .foregroundColor(.secondary)
         }
-        .padding()
-        .onAppear { net.start() }
+        .tint(.white)
+    }
+
+    private var header: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(LinearGradient(colors: Theme.colors(model.armedMode), startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 56, height: 56)
+                Image(systemName: "iphone.radiowaves.left.and.right").font(.system(size: 26, weight: .bold)).foregroundColor(.white)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("USB Mirror").font(.largeTitle.weight(.heavy)).foregroundColor(.white)
+                Text("Mirror \u{00b7} Stream \u{00b7} Go Live").font(.subheadline.weight(.medium)).foregroundColor(Theme.dim)
+            }
+        }
+        .padding(.top, 12)
+        .padding(.bottom, 6)
+    }
+
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Tip: keep AssistiveTouch ON for a sharp, full-resolution game picture.", systemImage: "sparkles")
+            Label("Free Apple ID: reinstall with Sideloadly every 7 days.", systemImage: "clock.arrow.circlepath")
+        }
+        .font(.footnote)
+        .foregroundColor(Theme.faint)
+        .padding(.top, 8)
     }
 }
 
-/// Shows the iPhone's Wi-Fi / Hotspot IPv4 address and triggers the
-/// "Local Network" permission prompt once (needed for Wi-Fi mirroring:
-/// iOS only lets the broadcast accept Wi-Fi connections after this).
-final class WiFiInfo: ObservableObject {
-    @Published var addresses: [String] = []
-    private var listener: NWListener?
-    private var timer: Timer?
+/// One of the three big buttons on the home screen.
+struct ModeCard: View {
+    let mode: MirrorMode
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let badge: String
+    let armed: Bool
+    let action: () -> Void
 
-    func start() {
-        refresh()
-        if timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
-        }
-        // Advertising a Bonjour service makes iOS ask for Local Network access.
-        if listener == nil, let l = try? NWListener(using: .tcp) {
-            l.service = NWListener.Service(name: "iPhone USB Mirror", type: "_usbmirror._tcp")
-            l.newConnectionHandler = { $0.cancel() }
-            l.stateUpdateHandler = { _ in }
-            l.start(queue: .main)
-            listener = l
-        }
-    }
-
-    private func refresh() {
-        var found: [String] = []
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return }
-        defer { freeifaddrs(ifaddr) }
-        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let ifa = ptr.pointee
-            guard let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
-            let name = String(cString: ifa.ifa_name)
-            guard name == "en0" || name.hasPrefix("bridge") else { continue }   // Wi-Fi / Hotspot
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count),
-                           nil, 0, NI_NUMERICHOST) == 0 {
-                found.append(String(cString: host))
+    var body: some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            HStack(spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(LinearGradient(colors: Theme.colors(mode), startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 64, height: 64)
+                        .shadow(color: Theme.colors(mode)[0].opacity(0.5), radius: 12, y: 6)
+                    Image(systemName: symbol).font(.system(size: 28, weight: .bold)).foregroundColor(.white)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Text(title).font(.title2.weight(.heavy)).foregroundColor(.white)
+                        Badge(text: badge, color: Theme.colors(mode)[0])
+                    }
+                    Text(subtitle).font(.subheadline).foregroundColor(Theme.dim).multilineTextAlignment(.leading)
+                    if armed {
+                        Label("Selected for the next broadcast", systemImage: "checkmark.circle.fill")
+                            .font(.caption.weight(.semibold)).foregroundColor(Theme.colors(mode)[0])
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").foregroundColor(Theme.faint)
             }
+            .padding(18)
+            .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(Theme.card))
+            .overlay(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(armed ? AnyShapeStyle(LinearGradient(colors: Theme.colors(mode), startPoint: .leading, endPoint: .trailing))
+                                  : AnyShapeStyle(Theme.cardStroke), lineWidth: armed ? 2 : 1)
+            )
         }
-        if found != addresses { addresses = found }
+        .buttonStyle(.plain)
     }
 }
 
-/// Wraps RPSystemBroadcastPickerView (the only way to start a broadcast).
-struct BroadcastPicker: UIViewRepresentable {
-    func makeUIView(context: Context) -> RPSystemBroadcastPickerView {
-        let picker = RPSystemBroadcastPickerView(frame: CGRect(x: 0, y: 0, width: 140, height: 140))
-        picker.preferredExtension = Self.findExtensionBundleID()
-        picker.showsMicrophoneButton = true    // lets you send the iPhone mic (optional)
+/// Small "on air" bar on the home screen while a live runs.
+struct LiveMiniBar: View {
+    let status: LiveStatus
 
-        // Make the tiny default button big.
-        if let button = picker.subviews.compactMap({ $0 as? UIButton }).first {
-            let config = UIImage.SymbolConfiguration(pointSize: 90, weight: .regular)
-            button.setImage(UIImage(systemName: "record.circle", withConfiguration: config), for: .normal)
-            button.tintColor = .systemRed
+    var body: some View {
+        HStack(spacing: 10) {
+            PulsingDot()
+            Text(status.state == "live" ? "LIVE" : status.state.capitalized).font(.headline.weight(.heavy))
+            Text(formatDuration(status.seconds)).font(.headline.monospacedDigit())
+            Spacer()
+            Text("\(status.kbps) kbps").font(.subheadline.monospacedDigit()).foregroundColor(Theme.dim)
         }
-        return picker
+        .foregroundColor(.white)
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 18).fill(Color.red.opacity(0.22)))
+    }
+}
+
+// MARK: - USB / Wi-Fi screen
+
+struct MirrorModeView: View {
+    let mode: MirrorMode
+    @EnvironmentObject var model: AppModel
+
+    private var colors: [Color] { Theme.colors(mode) }
+
+    var body: some View {
+        ZStack {
+            GlowBackground(colors: colors)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    hero
+                    if mode == .wifi { wifiCard }
+                    Card {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("How to start").font(.headline).foregroundColor(.white)
+                            if mode == .usb {
+                                StepRow(number: 1, text: "Plug the iPhone into the laptop and unlock it.", color: colors[0])
+                            } else {
+                                StepRow(number: 1, text: "iPhone and laptop on the same Wi-Fi (5 GHz is best), or the laptop on this iPhone's Personal Hotspot.", color: colors[0])
+                            }
+                            StepRow(number: 2, text: "Open iPhone USB Mirror on the laptop (Start Mirror).", color: colors[0])
+                            StepRow(number: 3, text: "Tap the button below \u{2192} Start Broadcast.", color: colors[0])
+                            StepRow(number: 4, text: "Open your game. Stop any time from the red pill / Control Center.", color: colors[0])
+                        }
+                    }
+                    BroadcastButton(title: "Start mirroring", subtitle: mode == .usb ? "Over the USB cable" : "Over Wi-Fi",
+                                    symbol: mode == .usb ? "cable.connector" : "wifi", colors: colors)
+                    tips
+                }
+                .padding(20)
+            }
+        }
+        .navigationTitle(mode == .usb ? "USB" : "Wi-Fi")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { model.armedMode = mode }
     }
 
-    func updateUIView(_ uiView: RPSystemBroadcastPickerView, context: Context) {}
-
-    /// Sideloadly may rename bundle IDs when it re-signs, so we look the
-    /// extension up at runtime instead of hard-coding its ID.
-    static func findExtensionBundleID() -> String? {
-        guard let plugIns = Bundle.main.builtInPlugInsURL,
-              let items = try? FileManager.default.contentsOfDirectory(
-                at: plugIns, includingPropertiesForKeys: nil) else { return nil }
-        for url in items where url.pathExtension == "appex" {
-            guard let bundle = Bundle(url: url),
-                  let ext = bundle.infoDictionary?["NSExtension"] as? [String: Any],
-                  ext["NSExtensionPointIdentifier"] as? String == "com.apple.broadcast-services-upload"
-            else { continue }
-            return bundle.bundleIdentifier
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: mode == .usb ? "cable.connector" : "wifi")
+                .font(.system(size: 40, weight: .bold))
+                .foregroundStyle(LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing))
+            Text(mode == .usb ? "Mirror with the cable" : "Mirror over Wi-Fi")
+                .font(.title.weight(.heavy)).foregroundColor(.white)
+            Text(mode == .usb ? "Lowest delay, sharpest picture and steady sound. Best for ranked games and long streams."
+                              : "No cable. The laptop finds this iPhone by itself. A little more delay than USB.")
+                .font(.subheadline).foregroundColor(Theme.dim)
         }
-        return nil
+        .padding(.vertical, 6)
+    }
+
+    private var wifiCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("This iPhone's Wi-Fi address").font(.caption.weight(.semibold)).foregroundColor(Theme.dim)
+                HStack {
+                    Text(model.addresses.first ?? "Not on Wi-Fi")
+                        .font(.system(size: 30, weight: .heavy, design: .rounded).monospacedDigit())
+                        .foregroundColor(.white)
+                    Spacer()
+                    Image(systemName: model.addresses.isEmpty ? "wifi.slash" : "checkmark.seal.fill")
+                        .font(.title2).foregroundColor(model.addresses.isEmpty ? .orange : colors[0])
+                }
+                Text("If iOS asks to find devices on your local network, tap Allow (Settings \u{203a} Privacy \u{203a} Local Network \u{203a} USB Mirror).")
+                    .font(.caption).foregroundColor(Theme.faint)
+            }
+        }
+    }
+
+    private var tips: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Tap Microphone ON in the broadcast sheet only if you want the iPhone mic in the stream.", systemImage: "mic")
+            Label(mode == .usb ? "On the laptop: first toolbar button = Auto or USB."
+                               : "On the laptop: first toolbar button = Auto or Wi-Fi. W searches now.",
+                  systemImage: "laptopcomputer")
+        }
+        .font(.footnote).foregroundColor(Theme.faint)
     }
 }

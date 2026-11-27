@@ -1,6 +1,8 @@
 // Broadcast Upload Extension entry point. ReplayKit calls
 // processSampleBuffer for every screen frame and audio buffer while the
-// broadcast runs. We encode/convert immediately and send over USB.
+// broadcast runs. Two modes (chosen in the app, see Shared/LiveConfig.swift):
+//   mirror : encode + send to the Windows receiver (USB or Wi-Fi)
+//   live   : the phone streams by itself to Facebook / YouTube (LiveStreamer)
 
 import ReplayKit
 import CoreMedia
@@ -27,6 +29,11 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var encoderDescription = "none"
     private var tickCount = 0
 
+    // which mode this broadcast runs in ("pending" until the settings arrive)
+    private let modeLock = NSLock()
+    private var mode = "pending"
+    private var live: LiveStreamer?
+
     // Wi-Fi: adaptive bitrate. Frames dropped because the network is behind
     // -> step down; several clean seconds -> step up again.
     private static let wifiLevels = [12_000_000, 8_000_000, 5_000_000, 3_000_000]
@@ -46,6 +53,37 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var micPieces = 0
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
+        ConfigFetcher.fetch { [weak self] cfg in
+            guard let self = self else { return }
+            if cfg.isLive {
+                self.startLive(cfg)
+            } else {
+                self.startMirror()
+            }
+        }
+    }
+
+    private func setMode(_ m: String) {
+        modeLock.lock(); mode = m; modeLock.unlock()
+    }
+
+    private var currentMode: String {
+        modeLock.lock(); defer { modeLock.unlock() }
+        return mode
+    }
+
+    private func startLive(_ cfg: LiveConfig) {
+        let l = LiveStreamer(config: cfg)
+        l.onFatal = { [weak self] message in
+            let err = NSError(domain: "USBMirror", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+            self?.finishBroadcastWithError(err)
+        }
+        live = l
+        setMode("live")
+        l.start()
+    }
+
+    private func startMirror() {
         server.onClientConnected = { [weak self] in
             guard let self = self else { return }
             self.stateLock.lock(); self.orientationDirty = true; self.stateLock.unlock()
@@ -63,12 +101,15 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
         server.start()
         audioServer.start()
+        setMode("mirror")
     }
 
     override func broadcastPaused() {}
     override func broadcastResumed() { encoder?.requestKeyframe() }
 
     override func broadcastFinished() {
+        live?.stop()
+        live = nil
         server.stop()
         audioServer.stop()
         encoder?.invalidate()
@@ -76,6 +117,15 @@ class SampleHandler: RPBroadcastSampleHandler {
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
+        switch currentMode {
+        case "live":
+            live?.process(sampleBuffer, type: sampleBufferType)
+            return
+        case "mirror":
+            break
+        default:
+            return                     // settings not here yet (first ~0.1 s)
+        }
         switch sampleBufferType {
         case .video:
             handleVideo(sampleBuffer)

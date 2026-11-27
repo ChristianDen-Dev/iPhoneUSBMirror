@@ -220,7 +220,10 @@ class Receiver(threading.Thread):
         ow, oh = max(2, int(rw * scale) & ~1), max(2, int(rh * scale) & ~1)
         # size to ask swscale for (before rotation)
         sw, sh = (oh, ow) if k % 2 else (ow, oh)
-        rgb = frame.reformat(width=sw, height=sh, format="rgb24", interpolation="BILINEAR").to_ndarray()
+        # Upscaling (small iPhone picture -> big window): Lanczos keeps edges/text
+        # sharper. Downscaling: bilinear is enough and cheaper.
+        interp = "LANCZOS" if sw > fw or sh > fh else "BILINEAR"
+        rgb = frame.reformat(width=sw, height=sh, format="rgb24", interpolation=interp).to_ndarray()
         # PyAV rows can be padded (and rot90 returns a view): pygame needs a
         # tightly packed C-contiguous buffer.
         rgb = np.ascontiguousarray(np.rot90(rgb, k) if k else rgb)

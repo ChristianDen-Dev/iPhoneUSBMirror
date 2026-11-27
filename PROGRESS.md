@@ -12,7 +12,7 @@ Read this first when resuming work.
 | 3 | iPhone app (Swift) | ✅ Done |
 | 4 | Cloud build (GitHub Actions) | ✅ Done |
 | 5 | Install with Sideloadly | ✅ Done |
-| 6 | Windows receiver (video) | ✅ Works (landscape sharpness issue open) |
+| 6 | Windows receiver (video) | ✅ Works (sharp with AssistiveTouch trick) |
 | 7 | Game audio | ✅ Works |
 | 8 | Polish + OBS | ⏳ Next |
 | 9 | Documentation | — |
@@ -76,8 +76,15 @@ Read this first when resuming work.
 - Fake-tone test and real iPhone: plays on "Speakers (Realtek(R) Audio)", 0 underruns, 0 skips.
 - Still to confirm by the user: game sound heard; OBS "Desktop Audio" picks it up (Phase 8).
 
+## Sharpness investigation ✅ SOLVED (2026-11-28)
+- INFO packet showed: ReplayKit hands the extension **886×1918** for normal screens, but only **408×886** while Mobile Legends is the only thing on screen (exactly 1/3 of the game's ~1224×2658 render size). Not our code, not bitrate, not Game Mode (tested off), not ML HD mode (already on), not frame rate.
+- Cause: iOS shows a lone full-screen game "direct to display"; screen capture then gets a reduced copy. Whenever any system overlay is on screen (Control Center, banner) the compositor is used and capture is full size.
+- **Fix:** turn on **AssistiveTouch** (Settings → Accessibility → Touch → AssistiveTouch, Idle Opacity 15%). Its floating button keeps the compositor active → ML captured at full **1918×886, 60 fps** (verified 2026-11-28 00:51).
+- Side effect: the AssistiveTouch button IS visible in the capture → park it at a screen edge/corner (and/or crop in OBS).
+- Receiver also gained Lanczos + unsharp-mask upscaling (`S` key) for any small frames.
+- Thermal state reads SERIOUS during long sessions (charging + game + encode); watch it in the 30-min test.
+
 ## Next
-- Re-install new .ipa (diagnostics) → read INFO line in ML → fix sharpness.
 - Phase 8: start_mirror.bat, OBS setup, 30-min stability test.
 
 ## Problems / notes

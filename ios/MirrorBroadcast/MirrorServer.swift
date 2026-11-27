@@ -31,9 +31,9 @@ final class MirrorServer {
     private var _pendingBytes = 0
 
     /// Video is skipped when more than this is still waiting to be sent.
-    private let videoBacklogLimit = 300_000
+    private let videoBacklogLimit = 1_000_000   // ~0.3 s at 30 Mbps; a big keyframe fits
     /// Audio (tiny) is only dropped when things are badly stuck.
-    private let audioBacklogLimit = 1_000_000
+    private let audioBacklogLimit = 2_000_000
 
     init(port: UInt16) {
         self.port = NWEndpoint.Port(rawValue: port)!

@@ -50,8 +50,8 @@ The receiver's `R` key can still flip landscape 180° if ever needed.
 - On connect, the iPhone forces a keyframe (preceded by `VIDEO_CONFIG`) and resends `ORIENTATION`.
 - If the screen doesn't change, ReplayKit sends no frames. The iPhone then re-sends the
   last image as a keyframe about once per second, so a new receiver always gets a picture.
-- **Frame dropping:** if more than ~300 KB is waiting to be sent, or the encoder is busy,
+- **Frame dropping:** if more than ~1 MB is waiting to be sent, or the encoder is busy,
   new video frames are skipped *before* encoding (so the H.264 stream stays valid).
-  Audio is only dropped if more than 1 MB is backed up.
-- Video: H.264 Main profile, no B-frames, ~8 Mbps average (12 Mbps cap), keyframe ≥ every 1 s,
+  Audio is only dropped if more than 2 MB is backed up.
+- Video: H.264 High profile, no B-frames, ~20 Mbps average (30 Mbps cap), keyframe ≥ every 2 s,
   long side ≤ 1920 px (iPhone 14 Pro Max: 1290×2796 → 886×1920).

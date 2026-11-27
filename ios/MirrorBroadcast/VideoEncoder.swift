@@ -1,6 +1,6 @@
-// Hardware H.264 encoder (VideoToolbox), tuned for low latency:
-// real-time, Main profile, no B-frames (no frame reordering), ~8 Mbps,
-// keyframe at least every 1 s. Frames are downscaled so the long side is
+// Hardware H.264 encoder (VideoToolbox), tuned for max quality at low latency:
+// real-time, High profile, no B-frames (no frame reordering), ~20 Mbps
+// (30 Mbps peaks; USB 2.0 carries this easily), keyframe at least every 2 s. Frames are downscaled so the long side is
 // at most 1920 px. Output is converted to Annex-B and handed to `onPacket`.
 //
 // Memory rules (extension limit ~50 MB):
@@ -18,8 +18,8 @@ final class VideoEncoder {
     var onPacket: ((Data) -> Void)?
 
     static let maxLongSide = 1920
-    static let bitrate = 8_000_000          // bits per second (average)
-    static let peakBytesPerSecond = 1_500_000 // ~12 Mbps hard cap
+    static let bitrate = 20_000_000           // bits per second (average)
+    static let peakBytesPerSecond = 3_750_000 // ~30 Mbps hard cap
     static let fps = 60
 
     let width: Int
@@ -77,14 +77,14 @@ final class VideoEncoder {
             if st != noErr { NSLog("[Mirror] VT property \(key) not set: \(st)") }
         }
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
-        set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Main_AutoLevel)
+        set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)   // no B-frames
         set(kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: Self.bitrate))
         set(kVTCompressionPropertyKey_DataRateLimits,
             [NSNumber(value: Self.peakBytesPerSecond), NSNumber(value: 1)] as CFArray)
         set(kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: Self.fps))
-        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: Self.fps))
-        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 1.0))
+        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: Self.fps * 2))
+        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 2.0))
         VTCompressionSessionPrepareToEncodeFrames(session)
 
         if width != sourceWidth || height != sourceHeight {

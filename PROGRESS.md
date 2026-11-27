@@ -111,7 +111,7 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Laptop part now: WASAPI shared 22 ms (driver floor; exclusive mode would hide sound from OBS/TikTok Desktop Audio → not used) + adaptive buffer ~30–40 ms ≈ **55–60 ms** (was ~200 ms). Remaining delay vs phone speaker is ReplayKit's own.
 
 ## Stream sound routing + iPhone mic (2026-11-28)
-- User approved installing **VB-Audio Virtual Cable** (Pack46, signed by Vincent Burel). Installer made "CABLE Input" the Windows default speaker → restored Realtek with `receiver	ools\set_default_speaker.ps1`; the app now auto-restores it at start.
+- User approved installing **VB-Audio Virtual Cable** (Pack46, signed by Vincent Burel). Installer made "CABLE Input" the Windows default speaker → restored Realtek with `receiver\tools\set_default_speaker.ps1`; the app now auto-restores it at start.
 - Own virtual sound device inside our app is not possible without a Microsoft-signed kernel driver (paid EV cert) → VB-Cable is the practical way.
 - `AudioRouter`: game sound → **CABLE Input** (stream, always 100 %) + **laptop speakers** (own volume, M = off). Laptop mute never mutes the stream.
 - TikTok LIVE Studio / OBS: Desktop audio = CABLE Input. Mic = their own mic source, OR:

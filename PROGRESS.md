@@ -167,6 +167,14 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - CI 46075059871 OK -> build\iPhoneUSBMirror.ipa; portable zip rebuilt (266 MB).
 - Latency (Wi-Fi mirror log): decode 2-6 ms, sound within +-10 ms of video; the delay spikes (up to ~240 ms) come from the Wi-Fi link (signal 53 %, Realtek "Leisure Power Save" = Auto). USB has none.
 
+## Phase 15 - Go Live fixes + rename to "Den-Dev Live" (2026-11-28)
+- User report: Facebook "trouble playing this video", picture upside down, audio crackling, live stopped; alert "RTMPConnection.Error error 3".
+- Read the HaishinKit 2.2.5 source: RTMP audio/video timestamps each start at their own first packet; multi-track mixer only outputs when the main track has data; NWConnection `.waiting` / viability=false closes the socket at once (= error 3 socketErrorOccurred).
+- Fixes: (1) AudioClock: our own 48 kHz mixer on a steady host-clock timer (game + mic converted, 100 ms buffer, 300 ms cap, limiter) -> continuous audio from the first second, single-track HaishinKit mixer; (2) video timestamps forced increasing and sent in order; (3) rotation fixed (ReplayKit 6 = 90 CCW -> CIImage .left), same table as the laptop receiver; (4) connect up to 6 tries with a fresh session each time, reconnect with a fresh session, ignore stale disconnect callbacks, stop only after >10 drops in 2 minutes; reasons logged.
+- No crash / jetsam report for the extension on the phone (checked with pymobiledevice3 crash reports; lzfse stubbed because Smart App Control blocks it).
+- App, broadcast name, PC window, shortcut, guide renamed to **Den-Dev Live** (bundle IDs unchanged so settings/key stay). Package: `dist\DenDevLive_Portable.zip`. OBS: re-pick the window "[python.exe]: Den-Dev Live".
+- CI 46077753042 OK -> build\DenDevLive.ipa (same as build\iPhoneUSBMirror.ipa).
+
 ## Next
 - Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
 - Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.

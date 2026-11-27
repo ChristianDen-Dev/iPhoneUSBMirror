@@ -13,6 +13,8 @@ enum PacketType: UInt8 {
     case orientation = 4   // u8 CGImagePropertyOrientation raw value (1...8)
     case heartbeat   = 5   // empty
     case info        = 6   // UTF-8 diagnostic text (receiver prints it)
+    case audioMic    = 7   // iPhone microphone, same format as audioPCM (only when the
+                           // Microphone toggle in the Start Broadcast sheet is ON)
 }
 
 enum PacketFlags {

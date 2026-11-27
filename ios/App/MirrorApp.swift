@@ -45,7 +45,7 @@ struct BroadcastPicker: UIViewRepresentable {
     func makeUIView(context: Context) -> RPSystemBroadcastPickerView {
         let picker = RPSystemBroadcastPickerView(frame: CGRect(x: 0, y: 0, width: 140, height: 140))
         picker.preferredExtension = Self.findExtensionBundleID()
-        picker.showsMicrophoneButton = false
+        picker.showsMicrophoneButton = true    // lets you send the iPhone mic (optional)
 
         // Make the tiny default button big.
         if let button = picker.subviews.compactMap({ $0 as? UIButton }).first {

@@ -17,6 +17,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     private let server = MirrorServer(port: SampleHandler.port)
     private let audioServer = MirrorServer(port: SampleHandler.audioPort)
     private let audio = AppAudioConverter()
+    private let micAudio = AppAudioConverter()   // separate converter: mic has its own format
     private var encoder: VideoEncoder?
 
     private let stateLock = NSLock()
@@ -31,6 +32,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var lastAudioArrival: CFTimeInterval = 0
     private var audioMaxGapMs: Double = 0
     private var audioPieces = 0
+    private var micPieces = 0
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         server.onClientConnected = { [weak self] in
@@ -65,7 +67,7 @@ class SampleHandler: RPBroadcastSampleHandler {
         case .audioApp:
             handleAudio(sampleBuffer)
         case .audioMic:
-            break   // game sound only
+            handleMic(sampleBuffer)
         @unknown default:
             break
         }
@@ -131,14 +133,15 @@ class SampleHandler: RPBroadcastSampleHandler {
         @unknown default: thermal = "?"
         }
         audioStatsLock.lock()
-        let pieces = audioPieces, maxGap = audioMaxGapMs
-        audioPieces = 0; audioMaxGapMs = 0
+        let pieces = audioPieces, maxGap = audioMaxGapMs, mics = micPieces
+        audioPieces = 0; audioMaxGapMs = 0; micPieces = 0
         audioStatsLock.unlock()
         let text = String(format: "source %@ -> encode %@ | orient %d | mem %.1f MB | thermal %@ | lowPower %@"
-                          + " | audio in %d pieces, max gap %.0f ms, channel %@",
+                          + " | audio in %d pieces, max gap %.0f ms, channel %@ | mic %@",
                           src, enc, Int(orient), memoryFootprintMB(), thermal,
                           ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off",
-                          pieces, maxGap, audioServer.isClientConnected ? "separate" : "main")
+                          pieces, maxGap, audioServer.isClientConnected ? "separate" : "main",
+                          mics > 0 ? "on" : "off")
         server.send(Packet.make(.info, timestampUs: 0, payload: Data(text.utf8)), isVideo: false)
     }
 
@@ -157,5 +160,16 @@ class SampleHandler: RPBroadcastSampleHandler {
         guard target.isClientConnected, let pcm = audio.convert(sb) else { return }
         let ts = microseconds(CMSampleBufferGetPresentationTimeStamp(sb))
         target.send(Packet.make(.audioPCM, timestampUs: ts, payload: pcm), isVideo: false)
+    }
+
+    /// iPhone microphone (only arrives when the Microphone toggle was ON when
+    /// the broadcast started). Sent as its own packet type so the receiver
+    /// decides where it goes (stream only, never the laptop speakers).
+    private func handleMic(_ sb: CMSampleBuffer) {
+        audioStatsLock.lock(); micPieces += 1; audioStatsLock.unlock()
+        let target = audioServer.isClientConnected ? audioServer : server
+        guard target.isClientConnected, let pcm = micAudio.convert(sb) else { return }
+        let ts = microseconds(CMSampleBufferGetPresentationTimeStamp(sb))
+        target.send(Packet.make(.audioMic, timestampUs: ts, payload: pcm), isVideo: false)
     }
 }

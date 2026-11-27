@@ -273,6 +273,64 @@ class _NoDevice(Exception):
     pass
 
 
+def find_laptop_mic():
+    """(index, name) of the real laptop/headset microphone (WASAPI), never the
+    virtual cable. Prefers the Windows default recording device."""
+    for api in sd.query_hostapis():
+        if "WASAPI" not in api["name"]:
+            continue
+        ins = [(i, sd.query_devices(i)["name"]) for i in api["devices"]
+               if sd.query_devices(i)["max_input_channels"] > 0]
+        real = [(i, n) for i, n in ins if "CABLE" not in n and "VB-Audio" not in n]
+        for i, n in real:
+            if i == api["default_input_device"]:
+                return i, n
+        return real[0] if real else None
+    return None
+
+
+class LaptopMic:
+    """Captures the laptop/headset microphone and hands each 5 ms piece
+    (48 kHz s16 stereo) to on_pcm. WASAPI shared mode: ~10-20 ms delay."""
+
+    def __init__(self, on_pcm):
+        self.on_pcm = on_pcm
+        self.stream = None
+        self.device_name = ""
+        self.error = ""
+
+    def start(self):
+        if self.stream is not None:
+            return True
+        dev = find_laptop_mic()
+        if dev is None:
+            self.error = "no microphone found"
+            return False
+        try:
+            self.stream = sd.RawInputStream(
+                device=dev[0], samplerate=RATE, channels=CHANNELS, dtype="int16",
+                blocksize=BLOCK_FRAMES, latency="low",
+                callback=lambda data, frames, t, status: self.on_pcm(bytes(data)),
+                extra_settings=sd.WasapiSettings(auto_convert=True))
+            self.stream.start()
+            self.device_name, self.error = dev[1], ""
+            print(f"[mic] laptop mic: {dev[1]}, delay {self.stream.latency * 1000:.0f} ms", flush=True)
+            return True
+        except Exception as e:
+            self.stream, self.error = None, str(e)
+            print(f"[mic] cannot open the laptop mic: {e}", flush=True)
+            return False
+
+    def stop(self):
+        if self.stream is not None:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+
+
 class AudioRouter:
     """Sends the game sound to two places:
       STREAM : the VB-Audio virtual cable ("CABLE Input"). TikTok LIVE Studio /
@@ -286,8 +344,9 @@ class AudioRouter:
         self.stream = AudioPlayer(STREAM_DEVICE, "stream")
         self.cable_name = (find_output(STREAM_DEVICE) or (None, ""))[1]
         self.stream_enabled = stream_enabled
-        self.mic_to_stream = True  # mix the iPhone mic into the stream (never the laptop)
+        self.mic_source = "laptop" # which mic goes into the stream: "laptop" / "phone" / "off"
         self.mic_muted = False
+        self.laptop_mic = LaptopMic(self._laptop_mic_pcm)
         self.mic_last = 0.0        # time the last mic piece arrived
         self.mic_level = 0.0
         self._mic_acc = 0.0
@@ -316,22 +375,54 @@ class AudioRouter:
         """True while the iPhone sends its microphone."""
         return time.monotonic() - self.mic_last < 1.5
 
-    def feed_mic(self, ts_us, pcm):
+    @property
+    def mic_ready(self):
+        """The chosen mic is really delivering sound."""
+        if self.mic_source == "phone":
+            return self.mic_active
+        if self.mic_source == "laptop":
+            return self.laptop_mic.stream is not None
+        return False
+
+    def set_mic_source(self, source):
+        """ONE mic at a time: laptop/headset, iPhone, or off (= TikTok/OBS's own mic)."""
+        self.mic_source = source
+        self.stream.reset_mix()
+        self.mic_level = 0.0
+        if source == "laptop" and self.cable_ok:
+            self.laptop_mic.start()
+        else:
+            self.laptop_mic.stop()
+
+    def _mic_in(self, pcm):
+        """Selected mic sound -> level meter + stream (never the laptop speakers)."""
         now = time.monotonic()
-        self.mic_last = now
         a = np.frombuffer(pcm, dtype=np.int16)
         if a.size:
             self._mic_acc = max(self._mic_acc, float(np.abs(a).max()) / 32768.0)
         if now - self._mic_t >= 0.1:
             self.mic_level, self._mic_acc, self._mic_t = self._mic_acc, 0.0, now
-        if self.cable_ok and self.mic_to_stream and not self.mic_muted:
+        if self.cable_ok and not self.mic_muted:
             self.stream.feed_mix(pcm)
+
+    def _laptop_mic_pcm(self, pcm):
+        if self.mic_source == "laptop":
+            self._mic_in(pcm)
+
+    def feed_mic(self, ts_us, pcm):
+        """iPhone mic pieces (only arrive when its Microphone toggle is on)."""
+        self.mic_last = time.monotonic()
+        if self.mic_source == "phone":
+            self._mic_in(pcm)
 
     def set_stream_enabled(self, on):
         self.stream_enabled = on
         if not on:
             self.stream.close()
             self.stream.reset()
+            self.laptop_mic.stop()
+        elif self.mic_source == "laptop":
+            self.laptop_mic.start()
 
     def reset(self):
         self.laptop.reset()
@@ -339,5 +430,6 @@ class AudioRouter:
         self.level = 0.0
 
     def close(self):
+        self.laptop_mic.stop()
         self.laptop.close()
         self.stream.close()

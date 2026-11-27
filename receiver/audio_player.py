@@ -29,10 +29,12 @@ BYTES_PER_FRAME = 4            # s16 * 2 channels
 BLOCK_FRAMES = 240             # 5 ms per callback
 TARGET_MS = 30                 # buffer we START with (small = low delay)
 TARGET_MAX_MS = 120            # ADAPTIVE: each underrun adds 10 ms, up to this
-TARGET_RELAX_S = 30            # ... and after this long without underruns it shrinks 5 ms
+TARGET_RELAX_S = 8             # ... and after this long without underruns it shrinks 10 ms
 DRIFT_BAND_MS = 20             # outside target +/- this: speed up / slow down slightly
 DRIFT_FRAMES = 3               # per 240-frame block = 1.25 % speed change
 MAX_MS = 200                   # emergency: above this we skip ahead to TARGET_MS
+LATE_MS = 90                   # Wi-Fi burst: more than target + this waiting -> drop the oldest (it is late)
+FAST_DRIFT_MS = 45             # more than target + this -> catch up 2x faster (2.5 %, not audible)
 
 
 def ms_to_bytes(ms):
@@ -92,13 +94,13 @@ class AudioPlayer:
             self._open()
         with self.lock:
             self.buf += pcm
-            if len(self.buf) > ms_to_bytes(MAX_MS):
+            if len(self.buf) > ms_to_bytes(min(MAX_MS, self.target_ms + LATE_MS)):
                 del self.buf[: len(self.buf) - ms_to_bytes(self.target_ms)]
                 self.skips += 1
             # adaptive buffer: shrink back slowly while playback is clean
             now = time.monotonic()
             if self.target_ms > TARGET_MS and now - self._last_underrun > TARGET_RELAX_S:
-                self.target_ms = max(TARGET_MS, self.target_ms - 5)
+                self.target_ms = max(TARGET_MS, self.target_ms - 10)
                 self._last_underrun = now
 
     def feed_mix(self, pcm: bytes):
@@ -216,7 +218,9 @@ class AudioPlayer:
                     return
             have = len(self.buf)
             take_frames = frames
-            if have > ms_to_bytes(target + DRIFT_BAND_MS):
+            if have > ms_to_bytes(target + FAST_DRIFT_MS):
+                take_frames = frames + 2 * DRIFT_FRAMES      # well behind: catch up faster
+            elif have > ms_to_bytes(target + DRIFT_BAND_MS):
                 take_frames = frames + DRIFT_FRAMES          # play a little faster
             elif have < ms_to_bytes(target - DRIFT_BAND_MS):
                 take_frames = frames - DRIFT_FRAMES          # play a little slower

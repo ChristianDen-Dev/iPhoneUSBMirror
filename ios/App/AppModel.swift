@@ -293,7 +293,11 @@ final class AppModel: ObservableObject {
         startConfigServer()
         MicSender.shared.listen()          // your voice for Go Live (starts only when a live starts)
         if appMic {                        // ask for the mic now, not hidden behind the broadcast sheet later
-            AVAudioApplication.requestRecordPermission { _ in }
+            if #available(iOS 17.0, *) {
+                AVAudioApplication.requestRecordPermission { _ in }
+            } else {
+                AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+            }
         }
         startBonjour()
         refreshAddresses()

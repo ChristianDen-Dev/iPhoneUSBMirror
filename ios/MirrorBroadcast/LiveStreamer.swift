@@ -441,6 +441,8 @@ final class LiveStreamer: @unchecked Sendable {
     private var silentTimer: DispatchSourceTimer?
     private var lastSentPTS = CMTime.invalid
     private var recentDrops: [Date] = []
+    private var publishURL: URL?
+    private var generation = 0
     private let minFrameGap: Double
 
     init(config: LiveConfig) {
@@ -497,69 +499,94 @@ final class LiveStreamer: @unchecked Sendable {
     }
 
     private func setUp(_ url: URL) async {
-        do {
-            await SessionBuilderFactory.shared.register(RTMPSessionFactory())
-            guard let s = try await SessionBuilderFactory.shared.make(url).build() else {
-                throw NSError(domain: "USBMirror", code: 2, userInfo: [NSLocalizedDescriptionKey: "unsupported address"])
-            }
-            session = s
-            let stream = await s.stream
-
-            var video = await stream.videoSettings
-            video.videoSize = CGSize(width: cfg.width, height: cfg.height)
-            video.bitRate = cfg.bitrate
-            video.profileLevel = kVTProfileLevel_H264_High_AutoLevel as String
-            video.maxKeyFrameIntervalDuration = 2          // platforms want a keyframe every 2 s
-            video.expectedFrameRate = Double(cfg.fps)
-            try await stream.setVideoSettings(video)
-
-            var audio = await stream.audioSettings
-            audio.bitRate = 128_000
-            try await stream.setAudioSettings(audio)
-
-            await stream.setBitRateStrategy(StreamVideoAdaptiveBitRateStrategy(mamimumVideoBitrate: cfg.bitrate))
-            await stream.setVideoInputBufferCounts(5)          // ReplayKit has ~50 MB: keep queues short
-
-            var vm = await mixer.videoMixerSettings
-            vm.mode = .passthrough                             // frames are already shaped
-            await mixer.setVideoMixerSettings(vm)
-            // audio: AudioClock mixes game + mic on a steady clock -> one track
-            await mixer.startRunning()
-            await mixer.addOutput(stream)
-
-            await connect(first: true)
-        } catch {
-            fail("Go Live could not start: \(error.localizedDescription)")
-        }
+        publishURL = url
+        await SessionBuilderFactory.shared.register(RTMPSessionFactory())
+        var vm = await mixer.videoMixerSettings
+        vm.mode = .passthrough                             // frames are already shaped
+        await mixer.setVideoMixerSettings(vm)
+        // audio: AudioClock mixes game + mic on a steady clock -> one track
+        await mixer.startRunning()
+        await connect(first: true)
     }
 
+    /// A fresh RTMP connection + stream with our settings, fed by the mixer.
+    private func makeSession(_ url: URL) async throws -> any Session {
+        guard let s = try await SessionBuilderFactory.shared.make(url).build() else {
+            throw NSError(domain: "DenDevLive", code: 2, userInfo: [NSLocalizedDescriptionKey: "unsupported address"])
+        }
+        let stream = await s.stream
+        var video = await stream.videoSettings
+        video.videoSize = CGSize(width: cfg.width, height: cfg.height)
+        video.bitRate = cfg.bitrate
+        video.profileLevel = kVTProfileLevel_H264_High_AutoLevel as String
+        video.maxKeyFrameIntervalDuration = 2          // platforms want a keyframe every 2 s
+        video.expectedFrameRate = Double(cfg.fps)
+        try await stream.setVideoSettings(video)
+        var audio = await stream.audioSettings
+        audio.bitRate = 128_000
+        try await stream.setAudioSettings(audio)
+        await stream.setBitRateStrategy(StreamVideoAdaptiveBitRateStrategy(mamimumVideoBitrate: cfg.bitrate))
+        await stream.setVideoInputBufferCounts(5)          // ReplayKit has ~50 MB: keep queues short
+        await mixer.addOutput(stream)
+        return s
+    }
+
+    /// Drop a broken connection completely (a new one is made for the next try).
+    private func dropSession() async {
+        guard let old = session else { return }
+        session = nil
+        let stream = await old.stream
+        await mixer.removeOutput(stream)
+        try? await old.close()
+    }
+
+    /// Connect, trying several times: the first seconds of a broadcast (and
+    /// short Wi-Fi / mobile-data hiccups) often make one try fail.
     private func connect(first: Bool) async {
-        guard let s = session, !isStopped else { return }
-        setState(first ? "connecting" : "reconnecting")
-        do {
-            try await s.connect { [weak self] in
-                self?.disconnected()
+        guard let url = publishURL else { return }
+        let tries = first ? 6 : 3
+        var lastError: Error?
+        for attempt in 1...tries {
+            if isStopped { return }
+            setState(first ? "connecting" : "reconnecting")
+            do {
+                if session == nil { session = try await makeSession(url) }
+                guard let s = session else { continue }
+                lock.lock(); generation += 1; let gen = generation; lock.unlock()
+                try await s.connect { [weak self] in
+                    self?.disconnected(gen)
+                }
+                lock.lock()
+                if startedAt == nil { startedAt = Date() }
+                status.message = ""
+                lock.unlock()
+                setState("live")
+                NSLog("[Mirror] LIVE (try \(attempt))")
+                return
+            } catch {
+                lastError = error
+                NSLog("[Mirror] live connect try \(attempt)/\(tries) failed: \(error)")
+                await dropSession()
+                lock.lock(); status.message = "Connecting\u{2026} try \(attempt + 1) of \(tries)"; lock.unlock()
+                try? await Task.sleep(nanoseconds: UInt64(1_500_000_000 + attempt * 500_000_000))
             }
-            lock.lock()
-            if startedAt == nil { startedAt = Date() }
-            status.message = ""
-            lock.unlock()
-            setState("live")
-            NSLog("[Mirror] LIVE")
-        } catch {
-            NSLog("[Mirror] live connect failed: \(error)")
-            if first {
-                fail("Could not go live. Check the stream key and server (\(cfg.platform)), and that the live is set up on the website. (\(error.localizedDescription))")
-            } else {
-                retryLater()
-            }
+        }
+        if first {
+            fail("Could not go live after \(tries) tries. Check the internet, the stream key and server (\(cfg.platform)), "
+                 + "and that the live is set up on the website. (\(lastError.map { "\($0)" } ?? "unknown"))")
+        } else {
+            retryLater()
         }
     }
 
-    private func disconnected() {
-        guard !isStopped else { return }
+    private func disconnected(_ gen: Int) {
+        lock.lock(); let current = gen == generation; lock.unlock()
+        guard !isStopped, current else { return }          // ignore old connections
         NSLog("[Mirror] live connection lost - reconnecting")
-        retryLater()
+        Task {
+            await self.dropSession()
+            self.retryLater()
+        }
     }
 
     private func retryLater() {

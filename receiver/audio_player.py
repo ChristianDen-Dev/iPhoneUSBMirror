@@ -39,8 +39,34 @@ def ms_to_bytes(ms):
     return int(RATE * ms / 1000) * BYTES_PER_FRAME
 
 
+STREAM_DEVICE = "CABLE Input"   # VB-Audio Virtual Cable: TikTok / OBS capture this, nobody hears it
+
+
+def wasapi_outputs():
+    """[(index, name)] of WASAPI playback devices + index of the Windows default."""
+    for api in sd.query_hostapis():
+        if "WASAPI" in api["name"]:
+            devs = [(i, sd.query_devices(i)["name"]) for i in api["devices"]
+                    if sd.query_devices(i)["max_output_channels"] > 0]
+            return devs, api["default_output_device"]
+    return [], -1
+
+
+def find_output(match):
+    devs, _ = wasapi_outputs()
+    for i, name in devs:
+        if match.lower() in name.lower() and "16ch" not in name:
+            return i, name
+    return None
+
+
 class AudioPlayer:
-    def __init__(self):
+    """Plays the game sound on ONE output device.
+    device_match=None -> the laptop speakers (Windows default, never the cable)."""
+
+    def __init__(self, device_match=None, label="laptop"):
+        self.device_match = device_match
+        self.label = label
         self.lock = threading.Lock()
         self.buf = bytearray()
         self.started = False         # False = (re)buffering
@@ -106,34 +132,55 @@ class AudioPlayer:
             return
         self._last_open_try = now
         try:
-            self.stream = self._open_wasapi() or sd.RawOutputStream(
+            self.stream = self._open_wasapi()
+            if self.stream is None and self.device_match:
+                raise _NoDevice()
+            self.stream = self.stream or sd.RawOutputStream(
                 samplerate=RATE, channels=CHANNELS, dtype="int16",
                 blocksize=BLOCK_FRAMES, latency="low", callback=self._callback)
             self.stream.start()
             if not self.device_name:
                 self.device_name = sd.query_devices(kind="output")["name"] + " (MME)"
-            print(f"[audio] playing on: {self.device_name}, output delay "
+            print(f"[audio] {self.label}: {self.device_name}, output delay "
                   f"{self.stream.latency * 1000:.0f} ms + buffer {TARGET_MS}-{TARGET_MAX_MS} ms (adaptive)", flush=True)
+        except _NoDevice:
+            self.stream = None
+            self.last_error = f"{self.device_match} not found"
         except Exception as e:
             self.stream = None
             self.last_error = str(e)
-            print(f"[audio] cannot open output device: {e}", flush=True)
+            print(f"[audio] {self.label}: cannot open output device: {e}", flush=True)
+
+    def _pick_device(self):
+        """WASAPI device index for this output, or None."""
+        devs, default = wasapi_outputs()
+        if self.device_match:
+            hit = find_output(self.device_match)
+            return hit[0] if hit else None
+        names = dict(devs)
+        if default >= 0 and "CABLE" not in names.get(default, ""):
+            return default
+        # Windows default is the virtual cable -> use the first real speaker instead
+        for i, name in devs:
+            if "CABLE" not in name and "VB-Audio" not in name:
+                return i
+        return None
 
     def _open_wasapi(self):
         """WASAPI = the modern Windows sound path: ~20 ms instead of ~90 ms
-        (old MME, the PortAudio default). Same default speakers/headset."""
+        (old MME, the PortAudio default)."""
         try:
-            for api in sd.query_hostapis():
-                if "WASAPI" in api["name"] and api["default_output_device"] >= 0:
-                    dev = api["default_output_device"]
-                    stream = sd.RawOutputStream(
-                        device=dev, samplerate=RATE, channels=CHANNELS, dtype="int16",
-                        blocksize=BLOCK_FRAMES, latency="low", callback=self._callback,
-                        extra_settings=sd.WasapiSettings(auto_convert=True))   # any device rate
-                    self.device_name = sd.query_devices(dev)["name"] + " (WASAPI)"
-                    return stream
+            dev = self._pick_device()
+            if dev is None:
+                return None
+            stream = sd.RawOutputStream(
+                device=dev, samplerate=RATE, channels=CHANNELS, dtype="int16",
+                blocksize=BLOCK_FRAMES, latency="low", callback=self._callback,
+                extra_settings=sd.WasapiSettings(auto_convert=True))   # any device rate
+            self.device_name = sd.query_devices(dev)["name"]
+            return stream
         except Exception as e:
-            print(f"[audio] WASAPI not available ({e}) - using the default path", flush=True)
+            print(f"[audio] {self.label}: WASAPI not available ({e})", flush=True)
         return None
 
     def _callback(self, outdata, frames, time_info, status):
@@ -186,3 +233,55 @@ class AudioPlayer:
         if vol != 1.0:
             a *= vol
         outdata[:] = np.clip(a, -32768, 32767).astype(np.int16).tobytes()
+
+
+class _NoDevice(Exception):
+    pass
+
+
+class AudioRouter:
+    """Sends the game sound to two places:
+      STREAM : the VB-Audio virtual cable ("CABLE Input"). TikTok LIVE Studio /
+               OBS capture it; nobody hears it -> the stream always has sound.
+      LAPTOP : the laptop speakers / headset, with its own volume and mute.
+    So muting the laptop never mutes the stream. Without the cable there is
+    only the LAPTOP output (then muting it also mutes "Desktop Audio")."""
+
+    def __init__(self, stream_enabled=True):
+        self.laptop = AudioPlayer(None, "laptop")
+        self.stream = AudioPlayer(STREAM_DEVICE, "stream")
+        self.cable_name = (find_output(STREAM_DEVICE) or (None, ""))[1]
+        self.stream_enabled = stream_enabled
+        self.level = 0.0          # loudest sample of the last ~0.1 s (0..1)
+        self._acc = 0.0
+        self._level_t = time.monotonic()
+
+    @property
+    def cable_ok(self):
+        return bool(self.cable_name) and self.stream_enabled
+
+    def feed(self, ts_us, pcm):
+        self.laptop.feed(ts_us, pcm)
+        if self.cable_ok:
+            self.stream.feed(ts_us, pcm)
+        a = np.frombuffer(pcm, dtype=np.int16)
+        if a.size:
+            self._acc = max(self._acc, float(np.abs(a).max()) / 32768.0)
+        now = time.monotonic()
+        if now - self._level_t >= 0.1:
+            self.level, self._acc, self._level_t = self._acc, 0.0, now
+
+    def set_stream_enabled(self, on):
+        self.stream_enabled = on
+        if not on:
+            self.stream.close()
+            self.stream.reset()
+
+    def reset(self):
+        self.laptop.reset()
+        self.stream.reset()
+        self.level = 0.0
+
+    def close(self):
+        self.laptop.close()
+        self.stream.close()

@@ -23,6 +23,7 @@ Debug: --tcp 127.0.0.1:2345 connects to a plain TCP address instead of usbmux
 import argparse
 import collections
 import json
+import math
 import os
 import time
 
@@ -30,7 +31,7 @@ import pygame
 
 import ui
 import winutil
-from audio_player import AudioPlayer
+from audio_player import AudioRouter
 from core import ST_CONNECTED, ST_NO_APP, ST_NO_USB, Receiver, Shared
 from recorder import Recorder
 from ui import (ACCENT, AMBER, BG, DIM, FAINT, GREEN, HEAT_COLORS, HOVER, LINE, ON, PANEL,
@@ -47,7 +48,8 @@ DEFAULTS = {
     "stream_hide_titlebar": False,   # Stream Mode without a title bar (old behaviour)
     "always_on_top": False,
     "show_stats": False,
-    "volume": 100,                   # 0-150 %
+    "volume": 100,                   # laptop volume 0-150 % (the stream always gets 100 %)
+    "stream_output": True,           # send game sound to the VB-Audio cable for TikTok / OBS
     "window_w": 1280,
     "window_h": 800,
 }
@@ -58,8 +60,9 @@ HELP_ROWS = [
     ("Esc", "Leave fullscreen / Stream Mode / this help"),
     ("F12", "Screenshot  (Pictures \\ iPhone USB Mirror)"),
     ("F9", "Start / stop recording  (Videos \\ iPhone USB Mirror)"),
-    ("M", "Mute laptop sound (also mutes OBS Desktop Audio)"),
-    ("Up / Down, wheel", "Volume"),
+    ("M", "Laptop sound on/off (the stream keeps its sound via VB-Cable)"),
+    ("Up / Down, wheel", "Laptop volume"),
+    ("A", "Sound panel: where game sound and mic come from"),
     ("T", "Always on top"),
     ("R", "Flip landscape 180°"),
     ("S", "Sharpen when the picture is enlarged"),
@@ -82,6 +85,32 @@ def load_settings():
     return cfg
 
 
+def fix_default_speaker():
+    """If Windows made the virtual cable the default speaker (VB-Cable's
+    installer does that), switch the default back to the real speakers -
+    otherwise every other laptop sound would go nowhere."""
+    try:
+        from audio_player import wasapi_outputs
+        devs, default = wasapi_outputs()
+        names = dict(devs)
+        if "CABLE" not in names.get(default, ""):
+            return
+        real = next((n for _, n in devs if "CABLE" not in n and "VB-Audio" not in n), None)
+        if not real:
+            return
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "set_default_speaker.ps1")
+        match = real.split("(")[-1].split(")")[0] if "(" in real else real    # e.g. "Realtek(R) Audio"
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, match],
+                           capture_output=True, text=True, timeout=20, creationflags=0x08000000)
+        print(f"[audio] Windows default speaker was the cable -> {r.stdout.strip().splitlines()[-1:]}", flush=True)
+        import sounddevice as sd
+        sd._terminate()          # re-read the device list (new default)
+        sd._initialize()
+    except Exception as e:
+        print(f"[audio] could not fix the default speaker: {e}", flush=True)
+
+
 def fmt_time(seconds):
     s = int(seconds)
     return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60:02d}:{s % 60:02d}"
@@ -95,8 +124,12 @@ class App:
         s = self.s = Shared()
         s.flip_landscape = self.cfg["flip_landscape"]
         s.sharpen = self.cfg["sharpen"]
-        self.audio = s.audio = AudioPlayer()
+        fix_default_speaker()
+        self.router = s.audio = AudioRouter(self.cfg["stream_output"])
+        self.audio = self.router.laptop          # what you hear on the laptop
         self.audio.set_volume(self.cfg["volume"] / 100)
+        print(f"[audio] stream output: {self.router.cable_name or 'VB-Audio cable not found'}"
+              f"{'' if self.cfg['stream_output'] else ' (switched off)'}", flush=True)
         self.rec = s.recorder = Recorder()
         self.rec.on_finished = self._recording_finished
 
@@ -117,10 +150,12 @@ class App:
         # UI state
         self.buttons = []                # [(key, rect, tooltip)] from the last draw
         self.slider_rect = None
+        self.meter_rect = None
         self.hover, self.hover_since, self.tip_shown = None, 0.0, False
         self.pressed = None
         self.dragging = False
         self.show_help = False
+        self.show_sound = False
         self.last_mouse = time.monotonic()
         self.cursor_visible = True
         self.overlay_visible = False     # fullscreen toolbar
@@ -266,7 +301,23 @@ class App:
             self.toast(f"Always on top {'on' if self.cfg['always_on_top'] else 'off'}")
         elif key == "mute":
             muted = self.audio.toggle_mute()
-            self.toast("Sound muted" if muted else "Sound on")
+            if not muted:
+                self.toast("Laptop sound on")
+            elif self.router.cable_ok:
+                self.toast("Laptop sound off  -  the stream still has the game sound", GREEN)
+            else:
+                self.toast("Sound off - this also mutes the stream (VB-Cable output is off)", AMBER)
+        elif key == "sound":
+            self.show_sound = not self.show_sound
+            self.show_help = False
+        elif key == "cable":
+            if not self.router.cable_name:
+                self.toast("VB-Audio Virtual Cable is not installed", AMBER)
+            else:
+                self.cfg["stream_output"] = not self.cfg["stream_output"]
+                self.router.set_stream_enabled(self.cfg["stream_output"])
+                self.save()
+                self.toast("Game sound to stream cable: " + ("ON" if self.cfg["stream_output"] else "OFF"))
         elif key in ("vol+", "vol-"):
             self.set_volume(self.cfg["volume"] + (10 if key == "vol+" else -10))
         elif key == "stats":
@@ -274,6 +325,7 @@ class App:
             self.save()
         elif key == "help":
             self.show_help = not self.show_help
+            self.show_sound = False
         elif key == "hidetitle":
             self.cfg["stream_hide_titlebar"] = not self.cfg["stream_hide_titlebar"]
             self.save()
@@ -303,9 +355,11 @@ class App:
             ("rec", ("Stop recording" if rec else "Start recording") + "\tF9", rec, rec or self.live),
             ("folder", "Open recordings folder\tO", False, True),
             None,
-            ("mute", "Mute laptop sound\tM", self.audio.muted, True),
-            ("vol+", f"Volume up  ({self.cfg['volume']} %)\tUp", False, self.cfg["volume"] < 150),
-            ("vol-", "Volume down\tDown", False, self.cfg["volume"] > 0),
+            ("sound", "Sound panel (game sound / mic)\tA", self.show_sound, True),
+            ("cable", "Send game sound to stream (VB-Cable)", self.router.cable_ok, bool(self.router.cable_name)),
+            ("mute", "Laptop sound off\tM", self.audio.muted, True),
+            ("vol+", f"Laptop volume up  ({self.cfg['volume']} %)\tUp", False, self.cfg["volume"] < 150),
+            ("vol-", "Laptop volume down\tDown", False, self.cfg["volume"] > 0),
             None,
             ("pin", "Always on top\tT", self.cfg["always_on_top"], True),
             ("flip", "Flip landscape 180°\tR", self.s.flip_landscape, True),
@@ -338,12 +392,14 @@ class App:
         pygame.K_m: "mute", pygame.K_UP: "vol+", pygame.K_DOWN: "vol-", pygame.K_EQUALS: "vol+",
         pygame.K_PLUS: "vol+", pygame.K_KP_PLUS: "vol+", pygame.K_MINUS: "vol-", pygame.K_KP_MINUS: "vol-",
         pygame.K_t: "pin", pygame.K_r: "flip", pygame.K_s: "sharpen", pygame.K_F1: "stats",
-        pygame.K_o: "folder", pygame.K_h: "help",
+        pygame.K_o: "folder", pygame.K_h: "help", pygame.K_a: "sound",
     }
 
     def hit(self, pos):
         if self.slider_rect and self.slider_rect.collidepoint(pos):
             return "slider"
+        if self.meter_rect and self.meter_rect.collidepoint(pos):
+            return "sound"
         for key, rect, _ in self.buttons:
             if rect.collidepoint(pos):
                 return key
@@ -413,8 +469,8 @@ class App:
                 self.save()
             elif e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
-                    if self.show_help:
-                        self.show_help = False
+                    if self.show_help or self.show_sound:
+                        self.show_help = self.show_sound = False
                     elif self.fullscreen:
                         self.do("full")
                     elif self.stream_mode:
@@ -474,7 +530,8 @@ class App:
             ("sharpen", "HD", "Sharpen when enlarged (S)", s.sharpen, None),
             ("pin", "pin" if not c["always_on_top"] else "unpin", "Always on top (T)", c["always_on_top"], None),
             "sep",
-            ("mute", "mute" if a.muted else "vol", "Mute laptop sound (M)", a.muted, None),
+            "meter",
+            ("mute", "mute" if a.muted else "vol", "Laptop sound on/off - stream keeps sound (M)", a.muted, None),
             "slider",
             "sep",
             ("stats", "stats", "Statistics (F1)", c["show_stats"], None),
@@ -490,7 +547,9 @@ class App:
         cy = rect.centery
         bw, bh, gap, sep, sl_w = p.px(36), p.px(34), p.px(2), p.px(14), p.px(118)
         specs = self.toolbar_specs()
-        total = sum(sep if x == "sep" else sl_w if x == "slider" else bw + gap for x in specs)
+        mt_w = p.px(30)
+        total = sum(sep if x == "sep" else sl_w if x == "slider" else mt_w if x == "meter" else bw + gap
+                    for x in specs)
         x = rect.right - total - p.px(8)
 
         # left: app name + status pills (only if there is room)
@@ -512,8 +571,12 @@ class App:
                 p.pill(scr, lx, cy, rl, RED)
 
         # right: buttons
-        self.buttons, self.slider_rect = [], None
+        self.buttons, self.slider_rect, self.meter_rect = [], None, None
         for spec in specs:
+            if spec == "meter":
+                self.draw_meter(pygame.Rect(x, cy - bh // 2, mt_w, bh))
+                x += mt_w
+                continue
             if spec == "sep":
                 pygame.draw.line(scr, LINE, (x + sep // 2, cy - p.px(12)), (x + sep // 2, cy + p.px(12)))
                 x += sep
@@ -559,6 +622,77 @@ class App:
         t = p.text(p.f_small, "mute" if self.audio.muted else f"{vol}%", DIM)
         scr.blit(t, (track.right + p.px(8), r.centery - t.get_height() // 2))
 
+    def level_fraction(self):
+        """Game sound level 0..1 on a dB scale (-50 dB .. 0 dB)."""
+        lv = self.router.level if self.live else 0.0
+        if lv <= 0.0:
+            return 0.0
+        return min(1.0, max(0.0, (20 * math.log10(lv) + 50) / 50))
+
+    def draw_meter(self, r):
+        """5 small bars showing the game sound level (click = sound panel)."""
+        p, scr = self.p, self.screen
+        self.meter_rect = r
+        if self.hover == "sound" or self.show_sound:
+            pygame.draw.rect(scr, ON if self.show_sound else HOVER, r, border_radius=p.px(6))
+        frac = self.level_fraction()
+        n, bw, gap = 5, p.px(3), p.px(2)
+        x = r.centerx - (n * bw + (n - 1) * gap) // 2
+        for i in range(n):
+            h = p.px(5 + i * 3)
+            lit = frac >= (i + 0.5) / n
+            col = (RED if i == 4 else AMBER if i == 3 else GREEN) if lit else PANEL_2
+            pygame.draw.rect(scr, col, (x, r.centery + p.px(8) - h, bw, h), border_radius=1)
+            x += bw + gap
+
+    def draw_sound_panel(self, area):
+        p, scr, rt = self.p, self.screen, self.router
+        w = min(area.width - p.px(20), p.px(640))
+        h = min(area.height - p.px(20), p.px(340))
+        box = pygame.Rect(0, 0, w, h)
+        box.center = area.center
+        p.panel(scr, box, PANEL, 14)
+        x0, y = box.left + p.px(24), box.top + p.px(18)
+        col2 = x0 + p.px(190)
+        t = p.text(p.f_h1, "Sound", TEXT)
+        scr.blit(t, (x0, y))
+        y += t.get_height() + p.px(14)
+
+        def row(title, value, color, note=""):
+            nonlocal y
+            scr.blit(p.text(p.f_ui_b, title, DIM), (x0, y))
+            scr.blit(p.text(p.f_ui, value, color), (col2, y))
+            y += p.px(24)
+            if note:
+                scr.blit(p.text(p.f_small, note, FAINT), (col2, y - p.px(2)))
+                y += p.px(22)
+            y += p.px(6)
+
+        scr.blit(p.text(p.f_ui_b, "Game sound (iPhone)", DIM), (x0, y))
+        bar = pygame.Rect(col2, y + p.px(6), box.right - col2 - p.px(28), p.px(10))
+        pygame.draw.rect(scr, PANEL_2, bar, border_radius=p.px(5))
+        fill = bar.copy()
+        fill.width = int(bar.width * self.level_fraction())
+        if fill.width > 0:
+            pygame.draw.rect(scr, GREEN, fill, border_radius=p.px(5))
+        y += p.px(34)
+
+        if rt.cable_ok:
+            row("To the stream", "VB-Audio cable - always on, even when the laptop is muted", GREEN,
+                "In TikTok LIVE Studio / OBS:  Desktop audio = CABLE Input")
+        elif rt.cable_name:
+            row("To the stream", "Cable output switched OFF", AMBER, "Right-click \u2192 Send game sound to stream")
+        else:
+            row("To the stream", "via laptop speakers (Desktop audio)", AMBER,
+                "Install VB-Audio Virtual Cable to stream with the laptop muted")
+        laptop = "OFF (muted)" if self.audio.muted else f"ON  {self.cfg['volume']} %"
+        row("Laptop speakers", laptop, AMBER if self.audio.muted else GREEN,
+            (self.audio.device_name or "-") + "   \u00b7   M = on/off")
+        row("Microphone", "comes from TikTok LIVE Studio / OBS", TEXT,
+            "Their Mic source (laptop or headset mic). This app never sends a mic.")
+        t = p.text(p.f_small, "Esc or A to close", FAINT)
+        scr.blit(t, (box.right - t.get_width() - p.px(20), box.bottom - p.px(26)))
+
     def draw_statusbar(self, rect):
         p, scr, s = self.p, self.screen, self.s
         pygame.draw.rect(scr, ui.PANEL, rect)
@@ -584,7 +718,9 @@ class App:
             if heat:
                 right.append((f"iPhone heat: {heat.capitalize()}", HEAT_COLORS.get(heat, DIM)))
             right.append((f"Audio {self.audio.buffered_ms:.0f} ms", DIM))
-        right.append(("Sound muted" if self.audio.muted else f"Volume {self.cfg['volume']}%",
+        if self.router.cable_ok:
+            right.append(("Stream sound: cable", GREEN))
+        right.append(("Laptop sound off" if self.audio.muted else f"Laptop {self.cfg['volume']}%",
                       AMBER if self.audio.muted else DIM))
         x = rect.right - p.px(12)
         for text, col in reversed(right):
@@ -642,7 +778,7 @@ class App:
             f"video {vw}x{vh}  orient {s.orientation}  window {area.width}x{area.height}",
             f"decode[{s.decoder_name}] {s.decode_ms:4.1f} ms  draw {s.render_ms:4.1f} ms  window {s.window_ms:4.1f} ms",
             f"late frames skipped {s.frames_skipped}",
-            f"audio {a.device_name}  channel: {s.audio_channel}",
+            f"audio laptop: {a.device_name}  stream: {self.router.stream.device_name or '-'}  channel: {s.audio_channel}",
             f"sync: {s.sync_text or '-'}",
             f"audio buffer {a.buffered_ms:3.0f}/{a.target_ms} ms  underruns {a.underruns}  skips {a.skips}  "
             f"speed fixes {a.corrections}",
@@ -708,6 +844,8 @@ class App:
     def draw_tooltip(self):
         if not self.hover or self.hover == "slider" or time.monotonic() - self.hover_since < 0.5:
             return
+        if self.hover == "sound" and self.meter_rect:
+            self.buttons = self.buttons + [("sound", self.meter_rect, "Game sound level - click for the sound panel (A)")]
         for key, r, tip in self.buttons:
             if key == self.hover:
                 p = self.p
@@ -740,13 +878,15 @@ class App:
         if toolbar:
             self.draw_toolbar(toolbar)
         else:
-            self.buttons, self.slider_rect = [], None
+            self.buttons, self.slider_rect, self.meter_rect = [], None, None
         if statusbar:
             self.draw_statusbar(statusbar)
         if self.cfg["show_stats"]:
             self.draw_stats(area)
         if self.show_help:
             self.draw_help(area)
+        if self.show_sound:
+            self.draw_sound_panel(area)
         self.draw_toast(area)
         self.draw_tooltip()
 
@@ -823,7 +963,7 @@ class App:
         if self.mode == "normal":
             self.windowed_size = self.screen.get_size()
         self.save()
-        self.audio.close()
+        self.router.close()
         pygame.quit()
 
 

@@ -1,449 +1,829 @@
 """
-mirror.py - iPhone USB Mirror receiver (Windows).
+mirror.py - iPhone USB Mirror receiver (Windows). Run this file.
 
-Connects to the iPhone's Broadcast Extension (TCP port 2345 on the phone)
-through usbmux (Apple Mobile Device service) over the USB cable, decodes the
-H.264 video and shows it in a window called "iPhone USB Mirror" for OBS
-Window Capture.
+Shows the iPhone screen (sent over the USB cable by the iPhone app's
+broadcast) in a window called "iPhone USB Mirror" and plays the game sound.
 
-Game sound plays on the default Windows output device (OBS "Desktop Audio").
+Three window modes:
+  Normal      : proper window with a toolbar (buttons), live status bar and
+                a step-by-step "how to connect" screen.
+  Stream Mode : (F2) clean picture only, at the iPhone's exact pixel size
+                (1:1, sharpest). Capture THIS in OBS / TikTok LIVE Studio.
+                Right-click opens a Windows menu that never shows in the capture.
+  Fullscreen  : (F11 or double-click) controls appear when the mouse moves.
 
-Keys:  F2  STREAM MODE: borderless window at the iPhone's exact pixel size
-           (1:1, no scaling) pinned top-left - best quality for OBS
-       F11 fullscreen | Esc leave fullscreen / stream mode | F1 stats overlay
-       M  mute / unmute game sound
-       S  sharpening on/off (used when the iPhone picture is enlarged)
-       R  flip landscape 180 deg (if the game shows upside-down)
+Keys: F2 Stream Mode | F11 fullscreen | Esc back | F12 screenshot | F9 record
+      M mute | Up/Down or mouse wheel volume | T always on top | R flip
+      S sharpen | F1 statistics | O open recordings folder | H help
 
 Debug: --tcp 127.0.0.1:2345 connects to a plain TCP address instead of usbmux
        (used with tools\\fake_iphone.py for testing without the phone).
-
-Protocol: see docs/PROTOCOL.md
 """
 
 import argparse
-import asyncio
 import collections
-import ctypes
 import json
 import os
-import socket
-import struct
-import sys
-import threading
 import time
-from fractions import Fraction
 
-import av
-from av.codec.hwaccel import HWAccel
-import numpy as np
 import pygame
-from pymobiledevice3 import usbmux
 
+import ui
+import winutil
 from audio_player import AudioPlayer
+from core import ST_CONNECTED, ST_NO_APP, ST_NO_USB, Receiver, Shared
+from recorder import Recorder
+from ui import (ACCENT, AMBER, BG, DIM, FAINT, GREEN, HEAT_COLORS, HOVER, LINE, ON, PANEL,
+                PANEL_2, PRESSED, RED, TEXT)
 
 WINDOW_TITLE = "iPhone USB Mirror"
-DEVICE_PORT = 2345
-SOCKET_TIMEOUT_S = 3.0          # iPhone sends a heartbeat every 1 s
-MAX_PAYLOAD = 8 * 1024 * 1024   # sanity limit for one packet
-
-HEADER = struct.Struct(">BBQI")  # type, flags, timestamp_us, length
-T_VIDEO_CONFIG, T_VIDEO_FRAME, T_AUDIO_PCM, T_ORIENTATION, T_HEARTBEAT, T_INFO = 1, 2, 3, 4, 5, 6
-FLAG_KEYFRAME = 0x01
-
+APP_FOLDER = "iPhone USB Mirror"
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
-# CGImagePropertyOrientation -> number of 90 deg counter-clockwise turns (np.rot90 k)
-#   1 up: 0 | 3 down: 180 | 6: 90 CCW | 8: 90 CW (= 3 CCW)
-# (6/8 directions confirmed on a real iPhone 14 Pro Max with Mobile Legends)
-ROTATION_K = {1: 0, 2: 0, 3: 2, 4: 2, 5: 3, 6: 1, 7: 1, 8: 3}
+DEFAULTS = {
+    "flip_landscape": False,
+    "sharpen": True,
+    "stream_mode": False,
+    "stream_hide_titlebar": False,   # Stream Mode without a title bar (old behaviour)
+    "always_on_top": False,
+    "show_stats": False,
+    "volume": 100,                   # 0-150 %
+    "window_w": 1280,
+    "window_h": 800,
+}
+
+HELP_ROWS = [
+    ("F2", "Stream Mode: clean 1:1 picture for OBS / TikTok LIVE Studio"),
+    ("F11 / double-click", "Fullscreen"),
+    ("Esc", "Leave fullscreen / Stream Mode / this help"),
+    ("F12", "Screenshot  (Pictures \\ iPhone USB Mirror)"),
+    ("F9", "Start / stop recording  (Videos \\ iPhone USB Mirror)"),
+    ("M", "Mute laptop sound (also mutes OBS Desktop Audio)"),
+    ("Up / Down, wheel", "Volume"),
+    ("T", "Always on top"),
+    ("R", "Flip landscape 180°"),
+    ("S", "Sharpen when the picture is enlarged"),
+    ("F1", "Statistics"),
+    ("O", "Open recordings folder"),
+    ("Right-click", "All options"),
+]
 
 
-H264_PROFILES = {66: "Baseline", 77: "Main", 88: "Extended", 100: "High"}
-
-
-def describe_sps(annexb: bytes) -> str:
-    """'H.264 High' etc. from the SPS inside an Annex-B parameter-set blob."""
-    i = annexb.find(b"\x00\x00\x01")
-    while i != -1 and i + 4 < len(annexb):
-        nal = annexb[i + 3]
-        if nal & 0x1F == 7:                     # SPS: profile_idc follows the NAL header
-            prof = annexb[i + 4]
-            return f"H.264 {H264_PROFILES.get(prof, prof)}"
-        i = annexb.find(b"\x00\x00\x01", i + 3)
-    return "H.264 (unknown profile)"
-
-
-class NoDeviceError(Exception):
-    pass
-
-
-# --------------------------------------------------------------------------
-# Shared state between the network thread and the window (main) thread.
-# --------------------------------------------------------------------------
-class Shared:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.running = True
-        self.status = "Starting..."
-        self.frame = None            # newest RGB numpy array (H, W, 3), ready to show
-        self.frame_seq = 0
-        self.target_size = (1280, 720)  # current window size (set by main thread)
-        self.orientation = 1
-        self.flip_landscape = False
-        self.sharpen = True          # unsharp mask when enlarging small frames
-        self.stream_mode = False     # F2: 1:1 borderless window for OBS
-        # stats
-        self.bytes_total = 0
-        self.frames_decoded = 0
-        self.frames_skipped = 0      # decoded but not drawn (a newer one was waiting)
-        self.render_ms = 0.0
-        self.window_ms = 0.0           # main thread: blit + flip time
-        self.decoder_name = ""
-        self.frame_ready = threading.Event()   # wakes the window loop on a new frame
-        self.video_size = (0, 0)
-        self.decode_ms = 0.0
-        self.info = ""               # last diagnostic text from the iPhone
-        # audio
-        self.audio = None            # AudioPlayer
-        self.last_video_ts = 0       # iPhone timestamps (us) for A/V sync stats
-        self.last_audio_ts = 0
-
-    def set_status(self, text):
-        with self.lock:
-            self.status = text
-
-    def clear_frame(self):
-        with self.lock:
-            self.frame = None
-            self.frame_seq += 1
-
-
-# --------------------------------------------------------------------------
-# Video thread: decode every packet (H.264 needs them all), but only draw
-# the NEWEST frame when it falls behind -> always low delay, never a backlog.
-# --------------------------------------------------------------------------
-class VideoWorker(threading.Thread):
-    MAX_BACKLOG = 90            # packets (~1.5 s); beyond this: drop all, wait for keyframe
-    MIN_DRAW_INTERVAL_S = 0.1   # even when behind, draw at least 10x per second
-
-    def __init__(self, receiver):
-        super().__init__(daemon=True, name="video")
-        self.rx = receiver
-        self.s = receiver.s
-        self.cv = threading.Condition()
-        self.q = collections.deque()
-        self._reset = True
-
-    def reset(self):
-        """New connection: drop queued packets, start a fresh decoder."""
-        with self.cv:
-            self.q.clear()
-            self._reset = True
-
-    def submit(self, data, is_key, ts_us):
-        with self.cv:
-            if len(self.q) >= self.MAX_BACKLOG:
-                print("[mirror] video backlog too big - skipping ahead to next keyframe", flush=True)
-                self.q.clear()
-                self._reset = True
-            self.q.append((data, is_key, ts_us))
-            self.cv.notify()
-
-    def run(self):
-        decoder = None
-        need_keyframe = True
-        last_draw = 0.0
-        while self.s.running:
-            with self.cv:
-                while not self.q and self.s.running:
-                    self.cv.wait(0.5)
-                if not self.s.running:
-                    break
-                if self._reset:
-                    self._reset = False
-                    decoder = self.make_decoder()
-                    need_keyframe = True
-                data, is_key, ts_us = self.q.popleft()
-
-            if need_keyframe and not is_key:
-                continue                            # wait for a clean start
-            t0 = time.perf_counter()
-            try:
-                frames = decoder.decode(av.Packet(data))
-            except av.FFmpegError as e:
-                print(f"[mirror] decode error: {e} - waiting for next keyframe", flush=True)
-                need_keyframe = True
-                continue
-            t1 = time.perf_counter()
-            need_keyframe = False
-            self.s.last_video_ts = ts_us
-            if frames:
-                with self.cv:
-                    behind = len(self.q)
-                if behind == 0 or t1 - last_draw >= self.MIN_DRAW_INTERVAL_S:
-                    self.rx.present(frames[-1])
-                    last_draw = t1
-                    self.s.render_ms = (time.perf_counter() - t1) * 1000
-                else:
-                    self.s.frames_skipped += 1      # a newer frame is already waiting
-            self.s.decode_ms = (t1 - t0) * 1000
-
-    # GPU decoders first (RTX = cuda, any GPU = d3d11va), CPU as the last resort.
-    HW_DEVICES = ("cuda", "d3d11va")
-
-    def make_decoder(self):
-        for dev in self.HW_DEVICES:
-            try:
-                ctx = av.CodecContext.create("h264", "r", hwaccel=HWAccel(device_type=dev,
-                                                                            allow_software_fallback=False))
-                if self.s.decoder_name != dev:
-                    print(f"[mirror] video decoder: GPU ({dev})", flush=True)
-                self.s.decoder_name = dev
-                return ctx
-            except Exception as e:
-                print(f"[mirror] GPU decoder {dev} not available: {e}", flush=True)
-        ctx = av.CodecContext.create("h264", "r")
-        ctx.thread_type = "SLICE"                   # slice threads add no delay
-        if self.s.decoder_name != "cpu":
-            print("[mirror] video decoder: CPU", flush=True)
-        self.s.decoder_name = "cpu"
-        return ctx
-
-
-# --------------------------------------------------------------------------
-# Network thread
-# --------------------------------------------------------------------------
-class Receiver(threading.Thread):
-    # Enlarging more than this -> Lanczos + sharpening filter.
-    UPSCALE_SHARPEN_AT = 1.15
-    UNSHARP = "5:5:1.0:5:5:0.0"   # luma 5x5 amount 1.0, chroma 5x5 off
-
-    def __init__(self, shared: Shared, tcp_address=None):
-        super().__init__(daemon=True, name="receiver")
-        self.s = shared
-        self.tcp_address = tcp_address
-        self._graph = None
-        self._graph_key = None
-        self._pts = 0
-        self.video = VideoWorker(self)
-        self.video.start()
-
-    # np.rot90-style k (CCW quarter turns) -> FFmpeg filters
-    ROTATE_FILTERS = {0: [], 1: [("transpose", "cclock")], 2: [("hflip", None), ("vflip", None)],
-                      3: [("transpose", "clock")]}
-
-    def _render(self, frame, k, out_w, out_h):
-        """One FFmpeg filter graph does everything in C (fast):
-        rotate (in YUV) -> scale only if needed -> optional sharpen -> BGRA."""
-        rw, rh = (frame.height, frame.width) if k % 2 else (frame.width, frame.height)
-        upscale = out_w / rw
-        sharpen = self.s.sharpen and upscale > self.UPSCALE_SHARPEN_AT
-        key = (frame.width, frame.height, frame.format.name, k, out_w, out_h, sharpen)
-        if key != self._graph_key:
-            g = av.filter.Graph()
-            last = g.add_buffer(width=frame.width, height=frame.height,
-                                format=frame.format.name, time_base=Fraction(1, 1000))
-            chain = list(self.ROTATE_FILTERS[k])
-            if (out_w, out_h) != (rw, rh):   # 1:1 (stream mode) skips scaling entirely
-                flags = "lanczos" if upscale > 1.0 else "bilinear"
-                chain.append(("scale", f"{out_w}:{out_h}:flags={flags}"))
-            if sharpen:
-                chain.append(("unsharp", self.UNSHARP))
-            chain.append(("format", "bgra"))  # native 32-bit: fastest upload to the window
-            for name, arg in chain:
-                node = g.add(name, arg) if arg else g.add(name)
-                last.link_to(node)
-                last = node
-            sink = g.add("buffersink")
-            last.link_to(sink)
-            g.configure()
-            self._graph, self._graph_key = g, key
-        self._pts += 1
-        frame.pts = self._pts
-        self._graph.push(frame)
-        return np.ascontiguousarray(self._graph.pull().to_ndarray())
-
-    # ---- connection -------------------------------------------------------
-    async def _usb_connect(self):
-        devices = await usbmux.list_devices()
-        usb = [d for d in devices if d.is_usb]
-        if not usb:
-            raise NoDeviceError()
-        return await usb[0].connect(DEVICE_PORT)
-
-    def open_socket(self):
-        if self.tcp_address:
-            host, port = self.tcp_address
-            return socket.create_connection((host, port), timeout=2)
-        # Selector loop: keeps the socket free of Windows IOCP so we can use
-        # it as a normal blocking socket afterwards.
-        return asyncio.run(self._usb_connect(), loop_factory=asyncio.SelectorEventLoop)
-
-    def run(self):
-        while self.s.running:
-            try:
-                sock = self.open_socket()
-            except NoDeviceError:
-                self.s.set_status("Waiting for iPhone...\nPlug in the USB cable and unlock the iPhone.")
-                time.sleep(1.0)
-                continue
-            except Exception:
-                self.s.set_status("iPhone found.\nOpen the USB Mirror app and tap Start Broadcast.")
-                time.sleep(1.0)
-                continue
-
-            self.s.set_status("Connected. Waiting for video...")
-            print(f"[mirror] {time.strftime('%H:%M:%S')} connected to iPhone", flush=True)
-            try:
-                self.stream(sock)
-            except Exception as e:  # disconnect, timeout, protocol error
-                print(f"[mirror] stream ended: {type(e).__name__}: {e}")
-            finally:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-                self.video.reset()
-                self.s.clear_frame()
-                if self.s.audio is not None:
-                    self.s.audio.reset()
-            time.sleep(0.3)
-
-    # ---- streaming --------------------------------------------------------
-    @staticmethod
-    def recv_exact(sock, n):
-        buf = bytearray(n)
-        view = memoryview(buf)
-        got = 0
-        while got < n:
-            r = sock.recv_into(view[got:], n - got)
-            if r == 0:
-                raise ConnectionError("iPhone closed the connection")
-            got += r
-        return buf
-
-    def stream(self, sock):
-        """Network loop: only reads packets and hands them out.
-        Audio is played immediately; video goes to the VideoWorker thread,
-        so a slow video frame can never delay the sound."""
-        sock.setblocking(True)
-        sock.settimeout(SOCKET_TIMEOUT_S)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        # bigger socket buffer: absorbs 20-30 Mbps bursts (keyframes)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-
-        self.video.reset()               # fresh decoder for each connection
-        config = b""                     # Annex-B SPS+PPS
-
-        while self.s.running:
-            ptype, flags, ts_us, length = HEADER.unpack(self.recv_exact(sock, HEADER.size))
-            if length > MAX_PAYLOAD:
-                raise ValueError(f"bad packet length {length}")
-            payload = self.recv_exact(sock, length) if length else b""
-            self.s.bytes_total += HEADER.size + length
-
-            if ptype == T_VIDEO_CONFIG:
-                if length >= 4:
-                    new_config = bytes(payload[4:])
-                    if new_config != config:
-                        w, h = struct.unpack(">HH", bytes(payload[:4]))
-                        print(f"[mirror] {time.strftime('%H:%M:%S')} stream: {describe_sps(new_config)}, {w}x{h}",
-                              flush=True)
-                    config = new_config
-            elif ptype == T_VIDEO_FRAME:
-                is_key = bool(flags & FLAG_KEYFRAME)
-                data = (config + bytes(payload)) if is_key else bytes(payload)
-                self.video.submit(data, is_key, ts_us)
-            elif ptype == T_ORIENTATION:
-                if length >= 1:
-                    self.s.orientation = payload[0]
-            elif ptype == T_AUDIO_PCM:
-                self.s.last_audio_ts = ts_us
-                if self.s.audio is not None:
-                    self.s.audio.feed(ts_us, bytes(payload))
-            elif ptype == T_INFO:
-                text = bytes(payload).decode("utf-8", "replace")
-                self.s.info = text
-                print(f"[iphone] {time.strftime('%H:%M:%S')} {text}", flush=True)
-            # T_HEARTBEAT: nothing to do (it just keeps the timeout from firing)
-
-    def present(self, frame):
-        """Rotate + fit the decoded frame to the window, then publish it (BGRA)."""
-        k = ROTATION_K.get(self.s.orientation, 0)
-        if self.s.flip_landscape and k in (1, 3):
-            k = (k + 2) % 4
-        fw, fh = frame.width, frame.height
-        rw, rh = (fh, fw) if k % 2 else (fw, fh)        # size after rotation
-        tw, th = self.s.target_size
-        scale = min(tw / rw, th / rh)
-        if abs(scale - 1.0) < 0.005:                      # 1:1 - keep every pixel
-            ow, oh = rw, rh
-        else:
-            ow, oh = max(2, int(rw * scale) & ~1), max(2, int(rh * scale) & ~1)
-        img = self._render(frame, k, ow, oh)
-        with self.s.lock:
-            self.s.frame = img
-            self.s.frame_seq += 1
-            self.s.frames_decoded += 1
-            self.s.video_size = (rw, rh)
-        self.s.frame_ready.set()
-
-
-# --------------------------------------------------------------------------
-# Window (main thread)
-# --------------------------------------------------------------------------
-def load_settings(shared):
+def load_settings():
+    cfg = dict(DEFAULTS)
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            shared.flip_landscape = bool(data.get("flip_landscape", False))
-            shared.sharpen = bool(data.get("sharpen", True))
-            shared.stream_mode = bool(data.get("stream_mode", False))
+        for k, v in data.items():
+            if k in cfg and type(v) is type(cfg[k]):
+                cfg[k] = v
     except (OSError, ValueError):
         pass
+    return cfg
 
 
-def save_settings(shared):
-    try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"flip_landscape": shared.flip_landscape, "sharpen": shared.sharpen,
-                       "stream_mode": shared.stream_mode}, f)
-    except OSError:
-        pass
+def fmt_time(seconds):
+    s = int(seconds)
+    return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60:02d}:{s % 60:02d}"
 
 
-def move_window_top_left():
-    """Pin the (borderless) window to the top-left corner of the main screen."""
-    if sys.platform != "win32":
-        return
-    try:
-        hwnd = pygame.display.get_wm_info()["window"]
-        SWP_NOSIZE, SWP_NOZORDER = 0x0001, 0x0004
-        ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER)
-    except Exception:
-        pass
+class App:
+    def __init__(self, tcp_address):
+        winutil.set_dpi_aware()
+        self.cfg = load_settings()
 
+        s = self.s = Shared()
+        s.flip_landscape = self.cfg["flip_landscape"]
+        s.sharpen = self.cfg["sharpen"]
+        self.audio = s.audio = AudioPlayer()
+        self.audio.set_volume(self.cfg["volume"] / 100)
+        self.rec = s.recorder = Recorder()
+        self.rec.on_finished = self._recording_finished
 
-def stream_mode_size(video_size, desktop_size):
-    """Exact video size (1:1); only shrunk if it doesn't fit on the screen."""
-    vw, vh = video_size
-    dw, dh = desktop_size
-    if vw <= 0 or vh <= 0:
-        return (1918, 886)  # landscape iPhone default until the first frame
-    scale = min(1.0, dw / vw, dh / vh)
-    return (max(2, int(vw * scale)), max(2, int(vh * scale)))
+        pygame.init()
+        pygame.display.set_caption(WINDOW_TITLE)
+        pygame.display.set_icon(ui.make_window_icon())
+        self.p = ui.Painter(winutil.ui_scale())
+        self.desktop = pygame.display.get_desktop_sizes()[0]
 
+        self.fullscreen = False
+        self.stream_mode = self.cfg["stream_mode"]
+        self.windowed_size = (self.cfg["window_w"], self.cfg["window_h"])
+        self.normal_pos = None
+        self.stream_size = None
+        self.screen = None
+        self.set_window()
 
-def draw_text_center(screen, font, text, color=(200, 200, 200)):
-    lines = text.split("\n")
-    sw, sh = screen.get_size()
-    heights = [font.size(line)[1] for line in lines]
-    y = (sh - sum(heights) - 8 * (len(lines) - 1)) // 2
-    for line, h in zip(lines, heights):
-        surf = font.render(line, True, color)
-        screen.blit(surf, ((sw - surf.get_width()) // 2, y))
-        y += h + 8
+        # UI state
+        self.buttons = []                # [(key, rect, tooltip)] from the last draw
+        self.slider_rect = None
+        self.hover, self.hover_since, self.tip_shown = None, 0.0, False
+        self.pressed = None
+        self.dragging = False
+        self.show_help = False
+        self.last_mouse = time.monotonic()
+        self.cursor_visible = True
+        self.overlay_visible = False     # fullscreen toolbar
+        self.last_click = (0.0, (0, 0))
+        self.toasts = []                 # [(text, color, start)]
+        self.messages = collections.deque()   # toasts from other threads
+        self.current = None              # (surface, numpy array kept alive)
+        self.last_seq = -1
+        self.dirty = True
+        self.last_sig = None
+        # stats
+        self.fps = 0.0
+        self.mbps = 0.0
+        self._tick_t = time.perf_counter()
+        self._tick_frames = 0
+        self._tick_bytes = 0
+        self._shown = 0
+        self._log_tick = 0
+
+        self.receiver = Receiver(s, tcp_address)
+        self.receiver.start()
+
+    # ================================================================ window
+    @property
+    def mode(self):
+        return "full" if self.fullscreen else ("stream" if self.stream_mode else "normal")
+
+    @property
+    def live(self):
+        return self.current is not None and self.s.state == ST_CONNECTED
+
+    def hwnd(self):
+        return winutil.get_hwnd()
+
+    def stream_window_size(self):
+        vw, vh = self.s.video_size
+        if vw <= 0 or vh <= 0:
+            vw, vh = 1918, 886                       # landscape iPhone until the first frame
+        wa = winutil.work_area() or (0, 0, *self.desktop)
+        ew, eh = (0, 0) if self.cfg["stream_hide_titlebar"] else winutil.frame_extra(self.hwnd())
+        avail_w = wa[2] - wa[0] - ew
+        avail_h = wa[3] - wa[1] - eh
+        scale = min(1.0, avail_w / vw, avail_h / vh)
+        return (max(2, int(vw * scale) & ~1), max(2, int(vh * scale) & ~1))
+
+    def set_window(self):
+        mode = self.mode
+        if mode == "full":
+            self.screen = pygame.display.set_mode(self.desktop, pygame.NOFRAME)
+            winutil.move_window(self.hwnd(), 0, 0)
+        elif mode == "stream":
+            size = self.stream_window_size()
+            flags = pygame.NOFRAME if self.cfg["stream_hide_titlebar"] else 0
+            self.screen = pygame.display.set_mode(size, flags)
+            self.stream_size = size
+        else:
+            self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
+        hwnd = self.hwnd()
+        winutil.dark_title_bar(hwnd)
+        winutil.set_topmost(hwnd, self.cfg["always_on_top"])
+        if mode != "full":
+            winutil.keep_on_screen(hwnd)
+        self.dirty = True
+
+    def remember_normal_pos(self):
+        if self.mode == "normal":
+            self.windowed_size = self.screen.get_size()
+            r = winutil.window_rect(self.hwnd())
+            self.normal_pos = r[:2] if r else None
+
+    def restore_normal_pos(self):
+        if self.mode == "normal" and self.normal_pos:
+            winutil.move_window(self.hwnd(), *self.normal_pos)
+            winutil.keep_on_screen(self.hwnd())
+
+    def save(self):
+        self.cfg["flip_landscape"] = self.s.flip_landscape
+        self.cfg["sharpen"] = self.s.sharpen
+        self.cfg["stream_mode"] = self.stream_mode
+        self.cfg["window_w"], self.cfg["window_h"] = self.windowed_size
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.cfg, f, indent=1)
+        except OSError:
+            pass
+
+    # ================================================================ actions
+    def toast(self, text, color=TEXT, force=False):
+        print(f"[ui] {text}", flush=True)
+        if self.mode != "stream" or force:          # keep the stream picture clean
+            self.toasts = [(text, color, time.monotonic())]
+            self.dirty = True
+
+    def do(self, key):
+        s = self.s
+        if key == "stream":
+            self.remember_normal_pos()
+            self.fullscreen = False
+            self.stream_mode = not self.stream_mode
+            self.set_window()
+            self.restore_normal_pos()
+            self.save()
+            if self.stream_mode:
+                self.toast("Stream Mode  ·  Esc or F2 to exit  ·  right-click for options", force=True)
+        elif key == "full":
+            if not self.fullscreen:
+                self.remember_normal_pos()
+            self.fullscreen = not self.fullscreen
+            self.set_window()
+            self.restore_normal_pos()
+        elif key == "shot":
+            if not self.live:
+                self.toast("No picture yet - start the broadcast first", AMBER)
+            else:
+                name = time.strftime("Screenshot %Y-%m-%d %H-%M-%S.png")
+                path = os.path.join(winutil.known_folder(winutil.FOLDER_PICTURES, "Pictures"), APP_FOLDER, name)
+                s.snapshot_request = (path, self._screenshot_done)
+        elif key == "rec":
+            if self.rec.active:
+                self.rec.stop()
+                self.toast("Saving recording...", DIM)
+            elif not self.live:
+                self.toast("No picture yet - start the broadcast first", AMBER)
+            else:
+                name = time.strftime("Recording %Y-%m-%d %H-%M-%S.mp4")
+                path = os.path.join(winutil.known_folder(winutil.FOLDER_VIDEOS, "Videos"), APP_FOLDER, name)
+                self.rec.start(path)
+                self.toast("Recording started  (F9 to stop)", RED)
+        elif key == "folder":
+            winutil.open_folder(os.path.join(winutil.known_folder(winutil.FOLDER_VIDEOS, "Videos"), APP_FOLDER))
+        elif key == "flip":
+            s.flip_landscape = not s.flip_landscape
+            self.save()
+            self.toast(f"Landscape flip {'on' if s.flip_landscape else 'off'}")
+        elif key == "sharpen":
+            s.sharpen = not s.sharpen
+            self.save()
+            self.toast(f"Sharpen {'on' if s.sharpen else 'off'}")
+        elif key == "pin":
+            self.cfg["always_on_top"] = not self.cfg["always_on_top"]
+            winutil.set_topmost(self.hwnd(), self.cfg["always_on_top"])
+            self.save()
+            self.toast(f"Always on top {'on' if self.cfg['always_on_top'] else 'off'}")
+        elif key == "mute":
+            muted = self.audio.toggle_mute()
+            self.toast("Sound muted" if muted else "Sound on")
+        elif key in ("vol+", "vol-"):
+            self.set_volume(self.cfg["volume"] + (10 if key == "vol+" else -10))
+        elif key == "stats":
+            self.cfg["show_stats"] = not self.cfg["show_stats"]
+            self.save()
+        elif key == "help":
+            self.show_help = not self.show_help
+        elif key == "hidetitle":
+            self.cfg["stream_hide_titlebar"] = not self.cfg["stream_hide_titlebar"]
+            self.save()
+            if self.mode == "stream":
+                self.set_window()
+        elif key == "menu":
+            self.show_menu()
+        elif key == "quit":
+            s.running = False
+        self.dirty = True
+
+    def set_volume(self, v):
+        v = int(min(150, max(0, v)))
+        self.cfg["volume"] = v
+        self.audio.set_volume(v / 100)
+        if self.audio.muted and v > 0:
+            self.audio.toggle_mute()
+        self.dirty = True
+
+    def show_menu(self):
+        rec = self.rec.active
+        items = [
+            ("stream", "Stream Mode (clean picture for OBS / TikTok)\tF2", self.stream_mode, True),
+            ("full", "Fullscreen\tF11", self.fullscreen, True),
+            None,
+            ("shot", "Take screenshot\tF12", False, self.live),
+            ("rec", ("Stop recording" if rec else "Start recording") + "\tF9", rec, rec or self.live),
+            ("folder", "Open recordings folder\tO", False, True),
+            None,
+            ("mute", "Mute laptop sound\tM", self.audio.muted, True),
+            ("vol+", f"Volume up  ({self.cfg['volume']} %)\tUp", False, self.cfg["volume"] < 150),
+            ("vol-", "Volume down\tDown", False, self.cfg["volume"] > 0),
+            None,
+            ("pin", "Always on top\tT", self.cfg["always_on_top"], True),
+            ("flip", "Flip landscape 180°\tR", self.s.flip_landscape, True),
+            ("sharpen", "Sharpen when enlarged\tS", self.s.sharpen, True),
+            ("hidetitle", "Stream Mode: hide title bar", self.cfg["stream_hide_titlebar"], True),
+            ("stats", "Show statistics\tF1", self.cfg["show_stats"], True),
+            None,
+            ("help", "Keyboard shortcuts\tH", self.show_help, True),
+            ("quit", "Exit\tAlt+F4", False, True),
+        ]
+        self.pressed, self.dragging = None, False
+        key = winutil.popup_menu(self.hwnd(), items)
+        if key:
+            self.do(key)
+        self.dirty = True
+
+    def _screenshot_done(self, path, error):
+        self.messages.append((f"Screenshot saved: {os.path.basename(path)}", GREEN) if not error
+                             else (f"Screenshot failed: {error}", RED))
+
+    def _recording_finished(self, path, error):
+        if error:
+            self.messages.append((f"Recording problem: {error}", RED))
+        else:
+            self.messages.append((f"Recording saved: {os.path.basename(path)}  (O opens the folder)", GREEN))
+
+    # ================================================================ input
+    KEYS = {
+        pygame.K_F2: "stream", pygame.K_F11: "full", pygame.K_F12: "shot", pygame.K_F9: "rec",
+        pygame.K_m: "mute", pygame.K_UP: "vol+", pygame.K_DOWN: "vol-", pygame.K_EQUALS: "vol+",
+        pygame.K_PLUS: "vol+", pygame.K_KP_PLUS: "vol+", pygame.K_MINUS: "vol-", pygame.K_KP_MINUS: "vol-",
+        pygame.K_t: "pin", pygame.K_r: "flip", pygame.K_s: "sharpen", pygame.K_F1: "stats",
+        pygame.K_o: "folder", pygame.K_h: "help",
+    }
+
+    def hit(self, pos):
+        if self.slider_rect and self.slider_rect.collidepoint(pos):
+            return "slider"
+        for key, rect, _ in self.buttons:
+            if rect.collidepoint(pos):
+                return key
+        return None
+
+    def slider_set(self, x):
+        r = self.slider_rect
+        frac = (x - r.left - self.p.px(6)) / max(1, r.width - self.p.px(12))
+        self.set_volume(round(min(1.0, max(0.0, frac)) * 150 / 5) * 5)
+
+    def handle_events(self):
+        now = time.monotonic()
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                self.s.running = False
+            elif e.type in (pygame.VIDEORESIZE, pygame.WINDOWSIZECHANGED):
+                self.screen = pygame.display.get_surface()
+                if self.mode == "normal":
+                    self.windowed_size = self.screen.get_size()
+                self.dirty = True
+            elif e.type in (pygame.WINDOWEXPOSED, pygame.WINDOWFOCUSGAINED, pygame.WINDOWRESTORED):
+                self.dirty = True
+            elif e.type == pygame.MOUSEMOTION:
+                self.last_mouse = now
+                if not self.cursor_visible:
+                    pygame.mouse.set_visible(True)
+                    self.cursor_visible = True
+                if self.dragging:
+                    self.slider_set(e.pos[0])
+                h = self.hit(e.pos)
+                if h != self.hover:
+                    self.hover, self.hover_since, self.tip_shown = h, now, False
+                    self.dirty = True
+            elif e.type == pygame.WINDOWLEAVE:
+                if self.hover:
+                    self.hover = None
+                    self.dirty = True
+            elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                h = self.hit(e.pos)
+                if h == "slider":
+                    self.dragging = True
+                    self.slider_set(e.pos[0])
+                elif h:
+                    self.pressed = h
+                    self.dirty = True
+                elif self.mode != "stream":
+                    t, p = self.last_click
+                    if now - t < 0.35 and abs(e.pos[0] - p[0]) < 8 and abs(e.pos[1] - p[1]) < 8:
+                        self.do("full")
+                        self.last_click = (0.0, (0, 0))
+                    else:
+                        self.last_click = (now, e.pos)
+            elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
+                if self.dragging:
+                    self.dragging = False
+                    self.save()
+                elif self.pressed:
+                    key, self.pressed = self.pressed, None
+                    if self.hit(e.pos) == key:
+                        self.do(key)
+                    self.dirty = True
+            elif e.type == pygame.MOUSEBUTTONUP and e.button == 3:
+                self.show_menu()
+            elif e.type == pygame.MOUSEWHEEL:
+                self.set_volume(self.cfg["volume"] + 5 * (1 if e.y > 0 else -1))
+                self.toast(f"Volume {self.cfg['volume']} %")
+                self.save()
+            elif e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_ESCAPE:
+                    if self.show_help:
+                        self.show_help = False
+                    elif self.fullscreen:
+                        self.do("full")
+                    elif self.stream_mode:
+                        self.do("stream")
+                    self.dirty = True
+                elif e.key in self.KEYS:
+                    key = self.KEYS[e.key]
+                    self.do(key)
+                    if key in ("vol+", "vol-"):
+                        self.toast(f"Volume {self.cfg['volume']} %")
+                        self.save()
+
+        # cursor + fullscreen toolbar auto-hide (never in normal mode)
+        idle = now - self.last_mouse
+        if self.mode != "normal" and idle > 2.0 and self.cursor_visible and not self.dragging:
+            pygame.mouse.set_visible(False)
+            self.cursor_visible = False
+        overlay = self.mode == "full" and (idle < 2.5 or self.dragging)
+        if overlay != self.overlay_visible:
+            self.overlay_visible = overlay
+            self.dirty = True
+        if self.hover and not self.tip_shown and now - self.hover_since > 0.5:
+            self.dirty = True
+
+    # ================================================================ drawing
+    def layout(self):
+        w, h = self.screen.get_size()
+        if self.mode == "normal":
+            tb, sb = self.p.px(48), self.p.px(28)
+            return (pygame.Rect(0, 0, w, tb), pygame.Rect(0, tb, w, max(2, h - tb - sb)),
+                    pygame.Rect(0, h - sb, w, sb))
+        toolbar = pygame.Rect(0, 0, w, self.p.px(48)) if self.overlay_visible else None
+        return toolbar, pygame.Rect(0, 0, w, h), None
+
+    def status_pill(self):
+        st = self.s.state
+        if self.live:
+            vw, vh = self.s.video_size
+            return f"Live  {vw}×{vh}  {self.fps:.0f} fps", GREEN
+        if st == ST_CONNECTED:
+            return "Connected - waiting for picture", ACCENT
+        if st == ST_NO_APP:
+            return "iPhone found - start the broadcast", ACCENT
+        return "Waiting for iPhone (USB)", AMBER
+
+    def toolbar_specs(self):
+        a, s, c = self.audio, self.s, self.cfg
+        rec = self.rec.active
+        return [
+            ("stream", "stream", "Stream Mode: clean picture for OBS / TikTok (F2)", self.stream_mode, None),
+            ("full", "unfull" if self.fullscreen else "full", "Fullscreen (F11)", self.fullscreen, None),
+            "sep",
+            ("shot", "shot", "Screenshot (F12)", False, None),
+            ("rec", "stop" if rec else "rec", "Stop recording (F9)" if rec else "Record video (F9)", rec, RED),
+            "sep",
+            ("flip", "flip", "Flip landscape 180° (R)", s.flip_landscape, None),
+            ("sharpen", "HD", "Sharpen when enlarged (S)", s.sharpen, None),
+            ("pin", "pin" if not c["always_on_top"] else "unpin", "Always on top (T)", c["always_on_top"], None),
+            "sep",
+            ("mute", "mute" if a.muted else "vol", "Mute laptop sound (M)", a.muted, None),
+            "slider",
+            "sep",
+            ("stats", "stats", "Statistics (F1)", c["show_stats"], None),
+            ("folder", "folder", "Open recordings folder (O)", False, None),
+            ("help", "help", "Keyboard shortcuts (H)", self.show_help, None),
+            ("menu", "menu", "All options (or right-click)", False, None),
+        ]
+
+    def draw_toolbar(self, rect):
+        p, scr = self.p, self.screen
+        pygame.draw.rect(scr, ui.PANEL, rect)
+        pygame.draw.line(scr, LINE, (rect.left, rect.bottom - 1), (rect.right, rect.bottom - 1))
+        cy = rect.centery
+        bw, bh, gap, sep, sl_w = p.px(36), p.px(34), p.px(2), p.px(14), p.px(118)
+        specs = self.toolbar_specs()
+        total = sum(sep if x == "sep" else sl_w if x == "slider" else bw + gap for x in specs)
+        x = rect.right - total - p.px(8)
+
+        # left: app name + status pills (only if there is room)
+        lx = p.px(12)
+        icon = pygame.transform.smoothscale(ui.make_window_icon(), (p.px(22), p.px(22)))
+        title = p.text(p.f_ui_b, WINDOW_TITLE)
+        label, color = self.status_pill()
+        need = icon.get_width() + p.px(8) + title.get_width() + p.px(14) + p.f_small.size(label)[0] + p.px(40)
+        if lx + need < x:
+            scr.blit(icon, (lx, cy - icon.get_height() // 2))
+            lx += icon.get_width() + p.px(8)
+            scr.blit(title, (lx, cy - title.get_height() // 2))
+            lx += title.get_width() + p.px(14)
+        if lx + p.f_small.size(label)[0] + p.px(40) < x:
+            lx += p.pill(scr, lx, cy, label, color) + p.px(8)
+        if self.rec.active:
+            rl = f"REC {fmt_time(self.rec.elapsed)}"
+            if lx + p.f_small.size(rl)[0] + p.px(40) < x:
+                p.pill(scr, lx, cy, rl, RED)
+
+        # right: buttons
+        self.buttons, self.slider_rect = [], None
+        for spec in specs:
+            if spec == "sep":
+                pygame.draw.line(scr, LINE, (x + sep // 2, cy - p.px(12)), (x + sep // 2, cy + p.px(12)))
+                x += sep
+                continue
+            if spec == "slider":
+                self.draw_slider(pygame.Rect(x, cy - bh // 2, sl_w, bh))
+                x += sl_w
+                continue
+            key, icon_name, tip, toggled, color = spec
+            r = pygame.Rect(x, cy - bh // 2, bw, bh)
+            bg = None
+            if self.pressed == key:
+                bg = PRESSED
+            elif self.hover == key:
+                bg = HOVER
+            elif toggled:
+                bg = (96, 28, 28) if key == "rec" else ON
+            if bg:
+                pygame.draw.rect(scr, bg, r, border_radius=p.px(6))
+            if icon_name == "HD":
+                surf = p.text(p.f_hd, "HD", TEXT if toggled else DIM)
+            else:
+                surf = p.icon(icon_name, color or (TEXT if toggled or self.hover == key else (205, 208, 216)))
+            p.blit_center(scr, surf, r)
+            self.buttons.append((key, r, tip))
+            x += bw + gap
+
+    def draw_slider(self, r):
+        p, scr = self.p, self.screen
+        self.slider_rect = r
+        vol = self.cfg["volume"]
+        track = pygame.Rect(r.left + p.px(6), r.centery - p.px(2), r.width - p.px(52), p.px(4))
+        pygame.draw.rect(scr, PANEL_2, track, border_radius=p.px(2))
+        frac = vol / 150
+        fill = track.copy()
+        fill.width = int(track.width * frac)
+        col = FAINT if self.audio.muted else (AMBER if vol > 100 else ACCENT)
+        pygame.draw.rect(scr, col, fill, border_radius=p.px(2))
+        mark = track.left + int(track.width * 100 / 150)          # 100 % mark
+        pygame.draw.line(scr, FAINT, (mark, track.top - p.px(3)), (mark, track.bottom + p.px(2)))
+        knob = (track.left + int(track.width * frac), track.centery)
+        pygame.draw.circle(scr, TEXT if self.hover == "slider" or self.dragging else (210, 212, 220), knob, p.px(6))
+        t = p.text(p.f_small, "mute" if self.audio.muted else f"{vol}%", DIM)
+        scr.blit(t, (track.right + p.px(8), r.centery - t.get_height() // 2))
+
+    def draw_statusbar(self, rect):
+        p, scr, s = self.p, self.screen, self.s
+        pygame.draw.rect(scr, ui.PANEL, rect)
+        pygame.draw.line(scr, LINE, rect.topleft, (rect.right, rect.top))
+        cy = rect.centery
+        if self.live:
+            vw, vh = s.video_size
+            dec = "GPU decode" if s.decoder_name in ("cuda", "d3d11va") else "CPU decode"
+            left = ["USB", s.codec or "H.264", f"{vw}×{vh}", f"{self.fps:.0f} fps", f"{self.mbps:.1f} Mbps", dec]
+        else:
+            left = ["Not mirroring"]
+        x = p.px(12)
+        for i, seg in enumerate(left):
+            t = p.text(p.f_small, seg, DIM if i else TEXT)
+            scr.blit(t, (x, cy - t.get_height() // 2))
+            x += t.get_width() + p.px(16)
+
+        right = []
+        if self.rec.active:
+            right.append((f"● REC {fmt_time(self.rec.elapsed)}  {self.rec.size_mb:.0f} MB", RED))
+        if self.live:
+            heat = s.thermal
+            if heat:
+                right.append((f"iPhone heat: {heat.capitalize()}", HEAT_COLORS.get(heat, DIM)))
+            right.append((f"Audio {self.audio.buffered_ms:.0f} ms", DIM))
+        right.append(("Sound muted" if self.audio.muted else f"Volume {self.cfg['volume']}%",
+                      AMBER if self.audio.muted else DIM))
+        x = rect.right - p.px(12)
+        for text, col in reversed(right):
+            t = p.text(p.f_small, text, col)
+            x -= t.get_width()
+            scr.blit(t, (x, cy - t.get_height() // 2))
+            x -= p.px(18)
+
+    def draw_waiting(self, area):
+        p, scr, st = self.p, self.screen, self.s.state
+        scr.fill(BG, area)
+        steps = [
+            ("Plug the iPhone into this laptop with the USB cable and unlock it", st != ST_NO_USB),
+            ("In the iPhone USB Mirror app tap the round button → Start Broadcast", st == ST_CONNECTED),
+            ("Open your game - the picture appears here", False),
+        ]
+        title = {ST_NO_USB: "Connect your iPhone", ST_NO_APP: "Start the broadcast"}.get(st, "Almost there...")
+        cw = min(p.px(600), area.width - p.px(32))
+        ch = p.px(300)
+        card = pygame.Rect(0, 0, cw, ch)
+        card.center = area.center
+        if cw < p.px(260) or area.height < ch:          # too small: one line only
+            t = p.text(p.f_ui, title, TEXT)
+            p.blit_center(scr, t, area)
+            return
+        p.panel(scr, card, PANEL, 14)
+        y = card.top + p.px(26)
+        t = p.text(p.f_h1, title, TEXT)
+        scr.blit(t, (card.left + p.px(28), y))
+        y += t.get_height() + p.px(18)
+        active_found = False
+        for text, done in steps:
+            active = not done and not active_found
+            active_found = active_found or active
+            cx = card.left + p.px(40)
+            p.check_circle(scr, (cx, y + p.px(11)), done, active)
+            t = p.text(p.f_h2, text, TEXT if (done or active) else DIM)
+            if t.get_width() > card.width - p.px(90):     # shrink long lines on small windows
+                t = p.text(p.f_small, text, TEXT if (done or active) else DIM)
+            scr.blit(t, (cx + p.px(24), y + p.px(11) - t.get_height() // 2))
+            y += p.px(44)
+        y += p.px(6)
+        tip = "Tip: keep AssistiveTouch ON for a sharp game picture (Settings › Accessibility › Touch)"
+        t = p.text(p.f_small, tip, DIM)
+        if t.get_width() < card.width - p.px(56):
+            scr.blit(t, (card.left + p.px(28), y))
+        t = p.text(p.f_small, "Right-click for all options  ·  H for keyboard shortcuts", FAINT)
+        scr.blit(t, (card.left + p.px(28), card.bottom - p.px(30)))
+
+    def draw_stats(self, area):
+        p, s, a = self.p, self.s, self.audio
+        vw, vh = s.video_size
+        lines = [
+            f"{self.fps:5.1f} fps   {self.mbps:5.2f} Mbps   {s.codec}",
+            f"video {vw}x{vh}  orient {s.orientation}  window {area.width}x{area.height}",
+            f"decode[{s.decoder_name}] {s.decode_ms:4.1f} ms  draw {s.render_ms:4.1f} ms  window {s.window_ms:4.1f} ms",
+            f"late frames skipped {s.frames_skipped}",
+            f"audio {a.device_name}",
+            f"audio buffer {a.buffered_ms:3.0f}/{a.target_ms} ms  underruns {a.underruns}  skips {a.skips}  "
+            f"speed fixes {a.corrections}",
+            f"iPhone: {s.info or '-'}",
+        ]
+        if self.rec.active:
+            lines.append(f"recording [{self.rec.encoder_name}] {self.rec.frames} frames, dropped {self.rec.dropped}")
+        surfs = [p.text(p.f_mono, line, (120, 255, 140)) for line in lines]
+        w = max(x.get_width() for x in surfs) + p.px(20)
+        h = sum(x.get_height() + p.px(2) for x in surfs) + p.px(16)
+        box = pygame.Surface((w, h), pygame.SRCALPHA)
+        box.fill((0, 0, 0, 200))
+        y = p.px(8)
+        for x in surfs:
+            box.blit(x, (p.px(10), y))
+            y += x.get_height() + p.px(2)
+        self.screen.blit(box, (area.left + p.px(10), area.top + p.px(10)))
+
+    def draw_help(self, area):
+        p, scr = self.p, self.screen
+        rows = [(p.text(p.f_ui_b, k, ACCENT), p.text(p.f_ui, d, TEXT)) for k, d in HELP_ROWS]
+        kw = max(k.get_width() for k, _ in rows)
+        dw = max(d.get_width() for _, d in rows)
+        rh = p.px(28)
+        w = min(area.width - p.px(20), kw + dw + p.px(80))
+        h = min(area.height - p.px(20), len(rows) * rh + p.px(90))
+        box = pygame.Rect(0, 0, w, h)
+        box.center = area.center
+        p.panel(scr, box, PANEL, 14)
+        t = p.text(p.f_h1, "Keyboard shortcuts", TEXT)
+        scr.blit(t, (box.left + p.px(24), box.top + p.px(16)))
+        y = box.top + p.px(24) + t.get_height()
+        for k, d in rows:
+            if y + rh > box.bottom - p.px(30):
+                break
+            scr.blit(k, (box.left + p.px(24), y))
+            scr.blit(d, (box.left + p.px(40) + kw, y))
+            y += rh
+        t = p.text(p.f_small, "Esc or H to close", FAINT)
+        scr.blit(t, (box.right - t.get_width() - p.px(20), box.bottom - p.px(26)))
+
+    def draw_toast(self, area):
+        if not self.toasts:
+            return
+        text, color, t0 = self.toasts[-1]
+        age = time.monotonic() - t0
+        if age > 2.8:
+            self.toasts = []
+            self.dirty = True
+            return
+        p = self.p
+        t = p.text(p.f_ui, text, color)
+        w, h = t.get_width() + p.px(32), t.get_height() + p.px(16)
+        box = pygame.Surface((w, h), pygame.SRCALPHA)
+        pygame.draw.rect(box, (20, 21, 26, 235), box.get_rect(), border_radius=h // 2)
+        pygame.draw.rect(box, (*LINE, 255), box.get_rect(), width=1, border_radius=h // 2)
+        box.blit(t, (p.px(16), p.px(8)))
+        if age > 2.3:
+            box.set_alpha(int(255 * (2.8 - age) / 0.5))
+        self.screen.blit(box, (area.centerx - w // 2, area.bottom - h - p.px(24)))
+        self.dirty = True                                 # keep animating
+
+    def draw_tooltip(self):
+        if not self.hover or self.hover == "slider" or time.monotonic() - self.hover_since < 0.5:
+            return
+        for key, r, tip in self.buttons:
+            if key == self.hover:
+                p = self.p
+                t = p.text(p.f_small, tip, TEXT)
+                box = pygame.Rect(0, 0, t.get_width() + p.px(16), t.get_height() + p.px(8))
+                box.midtop = (r.centerx, r.bottom + p.px(6))
+                box.right = min(box.right, self.screen.get_width() - p.px(4))
+                box.left = max(box.left, p.px(4))
+                p.panel(self.screen, box, PANEL_2, 6)
+                self.screen.blit(t, (box.left + p.px(8), box.top + p.px(4)))
+                self.tip_shown = True
+                return
+
+    def draw(self):
+        toolbar, area, statusbar = self.layout()
+        self.s.target_size = area.size
+        scr = self.screen
+        if self.current is not None:
+            surf = self.current[0]
+            sw, sh = surf.get_size()
+            scale = min(area.width / sw, area.height / sh)
+            if abs(scale - 1.0) > 0.01:                   # window changed since this frame was made
+                surf = pygame.transform.smoothscale(surf, (max(1, int(sw * scale)), max(1, int(sh * scale))))
+                sw, sh = surf.get_size()
+            if (sw, sh) != area.size:
+                scr.fill((0, 0, 0), area)                 # black bars only when needed
+            scr.blit(surf, (area.left + (area.width - sw) // 2, area.top + (area.height - sh) // 2))
+        else:
+            self.draw_waiting(area)
+        if toolbar:
+            self.draw_toolbar(toolbar)
+        else:
+            self.buttons, self.slider_rect = [], None
+        if statusbar:
+            self.draw_statusbar(statusbar)
+        if self.cfg["show_stats"]:
+            self.draw_stats(area)
+        if self.show_help:
+            self.draw_help(area)
+        self.draw_toast(area)
+        self.draw_tooltip()
+
+    # ================================================================ main loop
+    def tick_stats(self):
+        now = time.perf_counter()
+        dt = now - self._tick_t
+        if dt < 1.0:
+            return False
+        s = self.s
+        self.fps = (s.frames_in - self._tick_frames) / dt
+        self.mbps = (s.bytes_total - self._tick_bytes) * 8 / dt / 1e6
+        shown = self._shown / dt
+        self._tick_frames, self._tick_bytes, self._shown, self._tick_t = s.frames_in, s.bytes_total, 0, now
+        self._log_tick += 1
+        if self.live and self._log_tick % 5 == 0:     # console log every ~5 s
+            a = self.audio
+            vw, vh = s.video_size
+            print(f"[mirror] {time.strftime('%H:%M:%S')} fps {self.fps:.1f} (shown {shown:.1f}) | "
+                  f"{self.mbps:.2f} Mbps | video {vw}x{vh} | {self.mode} | "
+                  f"decode[{s.decoder_name}] {s.decode_ms:.1f} ms + draw {s.render_ms:.1f} ms"
+                  f" + window {s.window_ms:.1f} ms | late skipped {s.frames_skipped} | "
+                  f"audio buf {a.buffered_ms:.0f}/{a.target_ms} ms, underruns {a.underruns}, skips {a.skips}, "
+                  f"speed fixes {a.corrections}{' MUTED' if a.muted else ''}"
+                  f"{' | REC ' + fmt_time(self.rec.elapsed) if self.rec.active else ''}", flush=True)
+        return True
+
+    def run(self):
+        s = self.s
+        while s.running:
+            self.handle_events()
+            while self.messages:
+                self.toast(*self.messages.popleft())
+
+            # Stream Mode follows the iPhone picture size (portrait <-> landscape)
+            if self.mode == "stream" and self.stream_window_size() != self.stream_size:
+                self.set_window()
+
+            with s.lock:
+                seq, arr = s.frame_seq, s.frame
+            if seq != self.last_seq:
+                self.last_seq = seq
+                self.dirty = True
+                if arr is None:
+                    self.current = None
+                else:
+                    h, w = arr.shape[:2]
+                    self.current = (pygame.image.frombuffer(arr, (w, h), "BGRA"), arr)
+                    self._shown += 1
+
+            if self.tick_stats() and (self.mode == "normal" or self.overlay_visible or self.cfg["show_stats"]):
+                self.dirty = True                         # status bar / timers once per second
+            sig = (s.state, self.current is None)
+            if sig != self.last_sig:
+                self.last_sig = sig
+                self.dirty = True
+
+            if self.dirty:
+                self.dirty = False
+                t0 = time.perf_counter()
+                self.draw()
+                pygame.display.flip()
+                s.window_ms = (time.perf_counter() - t0) * 1000
+            # Sleep until the video thread has a new frame (or 10 ms for input).
+            s.frame_ready.wait(0.010)
+            s.frame_ready.clear()
+
+        self.shutdown()
+
+    def shutdown(self):
+        if self.rec.active:
+            print("[rec] finishing the recording file...", flush=True)
+            self.rec.stop(wait_s=15)
+        if self.mode == "normal":
+            self.windowed_size = self.screen.get_size()
+        self.save()
+        self.audio.close()
+        pygame.quit()
 
 
 def main():
@@ -454,173 +834,7 @@ def main():
     if args.tcp:
         host, port = args.tcp.rsplit(":", 1)
         tcp_address = (host, int(port))
-
-    # Sharp rendering on high-DPI laptop screens.
-    if sys.platform == "win32":
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            try:
-                ctypes.windll.user32.SetProcessDPIAware()
-            except Exception:
-                pass
-
-    shared = Shared()
-    load_settings(shared)
-    shared.audio = AudioPlayer()
-
-    pygame.init()
-    pygame.display.set_caption(WINDOW_TITLE)
-    desktop_size = pygame.display.get_desktop_sizes()[0]
-    windowed_size = (1280, 720)
-    screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
-    fullscreen = False
-    stream_size = None           # current stream-mode window size
-    font = pygame.font.SysFont("segoeui", 26)
-    small = pygame.font.SysFont("consolas", 16)
-    clock = pygame.time.Clock()
-
-    receiver = Receiver(shared, tcp_address)
-    receiver.start()
-
-    show_stats = False
-    last_seq = -1
-    current = None               # (surface, numpy array kept alive)
-    fps_frames, fps_value, fps_t = 0, 0.0, time.perf_counter()
-    rate_bytes, rate_value = 0, 0.0
-    log_tick = 0
-    last_win, last_status = None, None
-
-    while shared.running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                shared.running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_F11:
-                    fullscreen = not fullscreen
-                    if fullscreen:
-                        windowed_size = screen.get_size()
-                        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-                    else:
-                        screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
-                elif event.key == pygame.K_ESCAPE and fullscreen:
-                    fullscreen = False
-                    screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
-                elif event.key == pygame.K_F2 or (event.key == pygame.K_ESCAPE and shared.stream_mode):
-                    shared.stream_mode = not shared.stream_mode if event.key == pygame.K_F2 else False
-                    save_settings(shared)
-                    fullscreen = False
-                    stream_size = None
-                    if not shared.stream_mode:
-                        screen = pygame.display.set_mode(windowed_size, pygame.RESIZABLE)
-                    print(f"[mirror] stream mode {'on' if shared.stream_mode else 'off'}", flush=True)
-                elif event.key == pygame.K_F1:
-                    show_stats = not show_stats
-                elif event.key == pygame.K_m:
-                    muted = shared.audio.toggle_mute()
-                    print(f"[audio] {'muted' if muted else 'unmuted'}", flush=True)
-                elif event.key == pygame.K_s:
-                    shared.sharpen = not shared.sharpen
-                    save_settings(shared)
-                    print(f"[mirror] sharpen {'on' if shared.sharpen else 'off'}", flush=True)
-                elif event.key == pygame.K_r:
-                    shared.flip_landscape = not shared.flip_landscape
-                    save_settings(shared)
-
-        # Stream mode: keep the borderless window at the video's exact size.
-        if shared.stream_mode and not fullscreen:
-            want = stream_mode_size(shared.video_size, desktop_size)
-            if want != stream_size:
-                if stream_size is None and screen.get_flags() & pygame.RESIZABLE:
-                    windowed_size = screen.get_size()
-                screen = pygame.display.set_mode(want, pygame.NOFRAME)
-                move_window_top_left()
-                stream_size = want
-
-        win_w, win_h = screen.get_size()
-        shared.target_size = (win_w, win_h)
-
-        with shared.lock:
-            seq, arr, status = shared.frame_seq, shared.frame, shared.status
-        redraw = False
-        if seq != last_seq:
-            last_seq = seq
-            redraw = True
-            if arr is None:
-                current = None
-            else:
-                h, w = arr.shape[:2]
-                current = (pygame.image.frombuffer(arr, (w, h), "BGRA"), arr)
-                fps_frames += 1
-        # Redraw only when something changed: new frame, window change, status
-        # text, or stats overlay. Idle redraws just steal time from video.
-        if (win_w, win_h) != last_win or status != last_status or show_stats or current is None:
-            redraw = True
-        last_win, last_status = (win_w, win_h), status
-
-        t_draw = time.perf_counter()
-        if redraw and current is not None:
-            surf = current[0]
-            sw, sh = surf.get_size()
-            # Window was resized since this frame was made -> quick rescale.
-            scale = min(win_w / sw, win_h / sh)
-            if abs(scale - 1.0) > 0.01:
-                surf = pygame.transform.smoothscale(surf, (max(1, int(sw * scale)), max(1, int(sh * scale))))
-                sw, sh = surf.get_size()
-            if (sw, sh) != (win_w, win_h):
-                screen.fill((0, 0, 0))              # black bars only when needed
-            screen.blit(surf, ((win_w - sw) // 2, (win_h - sh) // 2))
-        elif redraw:
-            screen.fill((0, 0, 0))
-            draw_text_center(screen, font, status)
-
-        # Stats (hidden by default so they never show on stream)
-        now = time.perf_counter()
-        if now - fps_t >= 1.0:
-            fps_value = fps_frames / (now - fps_t)
-            total = shared.bytes_total
-            rate_value = (total - rate_bytes) * 8 / (now - fps_t) / 1e6
-            rate_bytes = total
-            fps_frames, fps_t = 0, now
-            log_tick += 1
-            if current is not None and log_tick % 5 == 0:   # console log every ~5 s
-                vw, vh = shared.video_size
-                a = shared.audio
-                print(f"[mirror] {time.strftime('%H:%M:%S')} fps {fps_value:.1f} | {rate_value:.2f} Mbps | "
-                      f"video {vw}x{vh} | orient {shared.orientation} | "
-                      f"decode[{shared.decoder_name}] {shared.decode_ms:.1f} ms + draw {shared.render_ms:.1f} ms"
-                      f" + window {shared.window_ms:.1f} ms | "
-                      f"late frames skipped {shared.frames_skipped} | "
-                      f"audio buf {a.buffered_ms:.0f} ms, underruns {a.underruns}, skips {a.skips}"
-                      f"{' MUTED' if a.muted else ''}", flush=True)
-        if show_stats:
-            vw, vh = shared.video_size
-            lines = [
-                f"FPS {fps_value:5.1f}   {rate_value:5.2f} Mbps",
-                f"video {vw}x{vh}  orient {shared.orientation}  flip {'on' if shared.flip_landscape else 'off'}",
-                f"decode {shared.decode_ms:4.1f} ms   window {win_w}x{win_h}",
-                f"audio buf {shared.audio.buffered_ms:3.0f} ms  underruns {shared.audio.underruns}  "
-                f"skips {shared.audio.skips}  {'MUTED' if shared.audio.muted else ''}  "
-                f"A-V {(shared.last_audio_ts - shared.last_video_ts) / 1000:+.0f} ms",
-                f"iPhone: {shared.info or '-'}",
-                f"sharpen {'on' if shared.sharpen else 'off'}",
-                "F2 stream mode  F11 fullscreen  M mute  S sharpen  R flip  F1 hide",
-            ]
-            y = 8
-            for line in lines:
-                t = small.render(line, True, (0, 255, 0), (0, 0, 0))
-                screen.blit(t, (8, y))
-                y += t.get_height() + 2
-
-        if redraw:
-            pygame.display.flip()
-            shared.window_ms = (time.perf_counter() - t_draw) * 1000
-        # Sleep until the video thread has a new frame (or 10 ms for key events).
-        shared.frame_ready.wait(0.010)
-        shared.frame_ready.clear()
-
-    shared.audio.close()
-    pygame.quit()
+    App(tcp_address).run()
 
 
 if __name__ == "__main__":

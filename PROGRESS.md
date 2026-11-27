@@ -14,7 +14,7 @@ Read this first when resuming work.
 | 5 | Install with Sideloadly | ✅ Done |
 | 6 | Windows receiver (video) | ✅ Works (sharp with AssistiveTouch trick) |
 | 7 | Game audio | ✅ Works |
-| 8 | Polish + OBS | ⏳ Next |
+| 8 | Polish + OBS | 🔧 In progress (new window, launcher done; OBS guide + 30-min test left) |
 | 9 | Documentation | — |
 
 ## Phase 0 — Computer check (2026-11-27)
@@ -84,8 +84,29 @@ Read this first when resuming work.
 - Receiver also gained Lanczos + unsharp-mask upscaling (`S` key) for any small frames.
 - Thermal state reads SERIOUS during long sessions (charging + game + encode); watch it in the 30-min test.
 
+## Max quality upgrade (2026-11-28)
+- iPhone: H.264 **High**, 20 Mbps (peak 30), keyframe every 2 s → `stream: H.264 High, 886x1918`.
+- Receiver split into threads: network / GPU video decode (cuda, d3d11va, CPU fallback) / window. Event-driven redraw. Decode ~3 ms + draw ~2 ms.
+- Real result: **1918×886 at 45–55 fps** in Mobile Legends (lobby ~30 fps = game's own rate), ~22 Mbps. iPhone heat reads SERIOUS → may limit fps.
+
+## Phase 8a — New app window ✅ (2026-11-28)
+Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` (look), `recorder.py`, `winutil.py`, `audio_player.py`.
+- **Normal mode:** real Windows window (dark title bar, resizable) + toolbar + status bar (codec, size, fps, Mbps, GPU, iPhone heat, audio, volume) + step-by-step connect screen.
+- **Stream Mode (F2):** keeps a real title bar (option to hide it), client area = exact 1:1 picture, cursor auto-hides, right-click = native Windows menu (not visible in OBS capture). Window placed by its visible edges (no off-screen pixels).
+- **Fullscreen (F11 / double-click):** controls appear on mouse move.
+- **Screenshot (F12)** → `Pictures\iPhone USB Mirror\*.png` (full resolution, upright).
+- **Recording (F9)** → `Videos\iPhone USB Mirror\*.mp4`, NVENC (RTX 5060) H.264 20 Mbps + AAC 192k, upright, raw game sound; fallbacks AMF/QSV/MF/x264. Tested: 157 frames + 6.6 s audio OK.
+- Volume slider 0–150 %, mute, always on top, flip, sharpen, stats (F1), help (H), open folder (O).
+- `receiver\start_mirror.bat`: double-click launcher.
+
+## Audio delay fix (2026-11-28)
+- User: laptop sound lags the phone. Measured laptop part: old MME output **90 ms** + buffer ~116 ms ≈ **200 ms**.
+- Now: **WASAPI** output (22 ms) + **adaptive** buffer (starts 40 ms, +10 ms per dropout up to 120, shrinks after 30 s clean) + smooth ±1.25 % speed drift correction instead of jumps. Real iPhone: settles ~60 ms → laptop part ≈ **80 ms**.
+- The rest is ReplayKit on the iPhone (it delivers app audio in chunks after it plays); cannot be zero. Phone speaker + laptop together will always echo slightly → turn the iPhone volume down while streaming.
+
 ## Next
-- Phase 8: start_mirror.bat, OBS setup, 30-min stability test.
+- Phase 8b: OBS / TikTok LIVE Studio capture guide, 30-min stability test.
+- Phase 9: docs.
 
 ## Problems / notes
 - Git has no author identity yet. The repo will be public, so after `gh auth login` set a **repo-local** identity with the GitHub noreply email (`<id>+<login>@users.noreply.github.com`), then make the first commit (files are staged).

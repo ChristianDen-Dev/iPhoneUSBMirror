@@ -145,6 +145,19 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Self-test imports everything with the portable Python; window opened and found VB-Cable + laptop mic when run from `dist`.
 - Other PC still needs: VB-Cable install (admin + restart) for streaming; Apple Devices app only for iPhone **USB** (Wi-Fi and Android need nothing).
 
+## Phase 13 — New app design + Go Live (phone streams by itself) (2026-11-28)
+- Researched PRISM Live Studio / TikTok LIVE: they offer screen broadcast to many platforms, a chat view that can be shown/hidden, a privacy screen during screencast, per-source volume. We copied that idea set.
+- **Home screen**: 3 big buttons — **USB** (lowest delay), **Wi-Fi** (wireless), **Go Live** (no PC). Dark glass design with color glows per mode. The screen you open last decides what the next Start Broadcast does.
+- **Go Live**: platform cards (Facebook / YouTube / TikTok / Custom RTMP), server prefilled, stream key in the **Keychain** (eye / paste buttons, "Where do I get my key?" link), quality presets (480p, 720p30, 720p60, 1080p30), landscape/portrait, game + mic volume, checklist, big GO LIVE button.
+- Extension streams with **HaishinKit 2.2.5** (BSD-3, SPM): frames rotated upright + fitted to 16:9 / 9:16 on the GPU, game sound + mic mixed, adaptive bitrate, auto-reconnect (10 tries), still screen keeps sending frames.
+- Settings app → extension without App Group: app serves JSON on 127.0.0.1:2399; extension asks at start and **every second** (live controls). Status back on 127.0.0.1:2347.
+- **Live dashboard**: LIVE timer, upload kbps, quality, fps, size, reconnects, stream health.
+- **Comments panel** (like TikTok LIVE): arrow tab on the right edge → panel slides in; arrow again (or swipe right) → hides. Built-in browser shows the platform's live chat; you sign in there yourself. Paste your live video link for the cleanest view (YouTube links become the live-chat page). Screen stays awake while it is open.
+- **Privacy screen**: "Screen hidden" → viewers see a "Be right back" card (sound continues). **Mic mute** button. Both in the panel and on the Go Live screen.
+- CI build 46072723838 OK → `build\iPhoneUSBMirror.ipa`; portable zip rebuilt (266 MB).
+- Limit: iOS does not let any app draw over other apps, so comments show when you switch back to USB Mirror (swipe the home bar), not on top of the game.
+- Real-phone test pending: install the new .ipa with Sideloadly, check USB/Wi-Fi still work, then Go Live to Facebook with privacy "Only me".
+
 ## Next
 - Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
 - Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.

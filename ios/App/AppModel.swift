@@ -1,6 +1,7 @@
 // App state: chosen mode, Go Live settings (stream key in the Keychain),
 // the settings server for the broadcast extension, live status, Wi-Fi info.
 
+import AVFoundation
 import Foundation
 import Network
 import Security
@@ -291,6 +292,9 @@ final class AppModel: ObservableObject {
     func start() {
         startConfigServer()
         MicSender.shared.listen()          // your voice for Go Live (starts only when a live starts)
+        if appMic {                        // ask for the mic now, not hidden behind the broadcast sheet later
+            AVAudioApplication.requestRecordPermission { _ in }
+        }
         startBonjour()
         refreshAddresses()
         timer?.invalidate()

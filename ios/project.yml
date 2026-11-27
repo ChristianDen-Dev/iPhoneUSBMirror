@@ -42,7 +42,7 @@ targets:
       properties:
         CFBundleDevelopmentRegion: en
         CFBundleDisplayName: Den-Dev Live
-        NSMicrophoneUsageDescription: Sends your voice to your stream when you turn on Microphone in the Start Broadcast sheet.
+        NSMicrophoneUsageDescription: Den-Dev Live sends your voice to your live stream (the game sound stays at normal volume).
         NSLocalNetworkUsageDescription: Lets the Windows receiver show your screen over Wi-Fi (no cable).
         NSBonjourServices: [_usbmirror._tcp]
         UIBackgroundModes: [audio]          # comments float over the game (Picture in Picture)
@@ -86,7 +86,7 @@ targets:
       properties:
         CFBundleDevelopmentRegion: en
         CFBundleDisplayName: Den-Dev Live   # name shown in the broadcast list
-        NSMicrophoneUsageDescription: Sends your voice to your stream when you turn on Microphone in the Start Broadcast sheet.
+        NSMicrophoneUsageDescription: Den-Dev Live sends your voice to your live stream (the game sound stays at normal volume).
         NSLocalNetworkUsageDescription: Lets the Windows receiver show your screen over Wi-Fi (no cable).
         CFBundleExecutable: $(EXECUTABLE_NAME)
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)

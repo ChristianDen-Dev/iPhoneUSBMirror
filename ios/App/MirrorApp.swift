@@ -14,9 +14,9 @@ struct MirrorApp: App {
         WindowGroup {
             ZStack {
                 HomeView()
-                // comments tab on the right edge (Go Live only)
+                // TikTok-style floating comments (Go Live only)
                 if model.armedMode == .live || model.liveConnected {
-                    CommentsOverlay().transition(.move(edge: .trailing))
+                    FloatingComments().transition(.opacity)
                 }
             }
                 .environmentObject(model)

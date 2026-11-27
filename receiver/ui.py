@@ -109,7 +109,11 @@ class Painter:
 
 
 def make_window_icon():
-    """32x32 app icon: a blue rounded square with a white phone outline."""
+    """App icon (icon.png, same logo as the iPhone app); drawn fallback."""
+    try:
+        return pygame.image.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png"))
+    except Exception:   # noqa: BLE001
+        pass
     s = pygame.Surface((32, 32), pygame.SRCALPHA)
     pygame.draw.rect(s, ACCENT, (0, 0, 32, 32), border_radius=7)
     pygame.draw.rect(s, (255, 255, 255), (10, 4, 12, 24), width=2, border_radius=3)

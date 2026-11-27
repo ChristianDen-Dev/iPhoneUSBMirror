@@ -2,6 +2,7 @@
 Run once: receiver\\.venv\\Scripts\\python.exe tools\\make_icon.py"""
 
 import io
+import json
 import os
 import struct
 
@@ -11,7 +12,7 @@ import pygame
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def draw(size):
+def draw(size, rounded=True):
     s = pygame.Surface((size, size), pygame.SRCALPHA)
     # gradient rounded square (blue -> purple -> red, like the iPhone app)
     grad = pygame.Surface((size, size), pygame.SRCALPHA)
@@ -20,7 +21,7 @@ def draw(size):
         t = y / (size - 1)
         pygame.draw.line(grad, [int(a[i] + (b[i] - a[i]) * t) for i in range(3)], (0, y), (size, y))
     mask = pygame.Surface((size, size), pygame.SRCALPHA)
-    pygame.draw.rect(mask, (255, 255, 255, 255), (0, 0, size, size), border_radius=size // 5)
+    pygame.draw.rect(mask, (255, 255, 255, 255), (0, 0, size, size), border_radius=size // 5 if rounded else 0)
     grad.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
     s.blit(grad, (0, 0))
     # phone outline
@@ -56,6 +57,19 @@ def main():
     with open(path, "wb") as f:
         f.write(out + data)
     pygame.image.save(draw(256), os.path.join(ROOT, "build", "icon_preview.png"))
+    # PC window icon (PNG) and the iPhone app icon (1024, square, no transparency - iOS rounds it)
+    pygame.image.save(draw(64), os.path.join(ROOT, "receiver", "icon.png"))
+    ios = os.path.join(ROOT, "ios", "App", "Assets.xcassets", "AppIcon.appiconset")
+    os.makedirs(ios, exist_ok=True)
+    big = pygame.Surface((1024, 1024))
+    big.blit(draw(1024, rounded=False), (0, 0))
+    pygame.image.save(big, os.path.join(ios, "AppIcon-1024.png"))
+    with open(os.path.join(ios, "Contents.json"), "w") as f:
+        json.dump({"images": [{"filename": "AppIcon-1024.png", "idiom": "universal",
+                               "platform": "ios", "size": "1024x1024"}],
+                   "info": {"author": "xcode", "version": 1}}, f, indent=2)
+    with open(os.path.join(ROOT, "ios", "App", "Assets.xcassets", "Contents.json"), "w") as f:
+        json.dump({"info": {"author": "xcode", "version": 1}}, f, indent=2)
     print("icon ->", path)
 
 

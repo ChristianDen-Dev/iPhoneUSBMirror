@@ -26,6 +26,7 @@ struct GoLiveView: View {
                     } else {
                         hero
                     }
+                    studioLink
                     platformCard
                     keyCard
                     qualityCard
@@ -81,6 +82,36 @@ struct GoLiveView: View {
                     .font(.caption).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// Opens the Studio (what viewers see).
+    private var studioLink: some View {
+        let fitName = model.fit == "blur" ? "Fit + blur" : (model.fit == "fit" ? "Fit" : "Fill")
+        var summary = (model.portrait ? "Portrait" : "Landscape") + " \u{00b7} " + fitName
+        if model.logoImage != nil { summary += " \u{00b7} logo" }
+        if !model.banner.isEmpty { summary += " \u{00b7} banner" }
+        return NavigationLink {
+            StudioView()
+        } label: {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(LinearGradient(colors: [Color.purple, colors[0]], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 48, height: 48)
+                    Image(systemName: "wand.and.stars").font(.title3.weight(.bold)).foregroundColor(.white)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Studio \u{00b7} stream look").font(.headline.weight(.heavy)).foregroundColor(.white)
+                    Text(summary).font(.caption).foregroundColor(Theme.dim)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").foregroundColor(Theme.faint)
+            }
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(colors[0].opacity(0.5), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 
     private var platformCard: some View {

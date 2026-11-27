@@ -36,6 +36,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.usbmirror.iphoneusbmirror
         PRODUCT_NAME: iPhoneUSBMirror
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: App/Info.plist
       properties:
@@ -44,6 +45,7 @@ targets:
         NSMicrophoneUsageDescription: Sends your voice to your stream when you turn on Microphone in the Start Broadcast sheet.
         NSLocalNetworkUsageDescription: Lets the Windows receiver show your screen over Wi-Fi (no cable).
         NSBonjourServices: [_usbmirror._tcp]
+        UIBackgroundModes: [audio]          # comments float over the game (Picture in Picture)
         CFBundleExecutable: $(EXECUTABLE_NAME)
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleInfoDictionaryVersion: "6.0"

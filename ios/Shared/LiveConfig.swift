@@ -33,6 +33,15 @@ struct LiveConfig: Codable, Equatable {
     // live controls (the extension asks for these again every second)
     var privacy: Bool = false             // viewers see "Be right back" instead of the screen
     var micMuted: Bool = false            // your voice is not sent
+    // stream look ("Studio"); changes show on the live within ~1 s
+    var fit: String = "blur"              // fit (black bars) / blur (fit + blurred background) / fill (crop)
+    var logo: String = ""                 // PNG, base64 ("" = none)
+    var logoCorner: Int = 1               // 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right
+    var logoScale: Double = 0.16          // logo height / video height
+    var banner: String = ""               // lower-third text ("" = none)
+    var bannerColor: Int = 0              // 0 red, 1 blue, 2 black, 3 purple
+    var badge: Bool = true                // "LIVE 12:34" pill
+    var brbText: String = "Be right back"
 
     var isLive: Bool { mode == "live" }
 

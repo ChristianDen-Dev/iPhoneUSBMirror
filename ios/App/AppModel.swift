@@ -143,6 +143,38 @@ final class AppModel: ObservableObject {
         didSet { UIApplication.shared.isIdleTimerDisabled = commentsOpen }   // screen stays on while reading
     }
 
+    // stream look (Studio)
+    @Published var fit = "blur" { didSet { defaults.set(fit, forKey: "look.fit") } }
+    @Published var logoCorner = 1 { didSet { defaults.set(logoCorner, forKey: "look.logoCorner") } }
+    @Published var logoScale = 0.16 { didSet { defaults.set(logoScale, forKey: "look.logoScale") } }
+    @Published var banner = "" { didSet { defaults.set(banner, forKey: "look.banner") } }
+    @Published var bannerColor = 0 { didSet { defaults.set(bannerColor, forKey: "look.bannerColor") } }
+    @Published var badge = true { didSet { defaults.set(badge, forKey: "look.badge") } }
+    @Published var brbText = "Be right back" { didSet { defaults.set(brbText, forKey: "look.brb") } }
+    @Published private(set) var logoImage: UIImage?
+    private var logoBase64 = ""
+    private static var logoFile: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("stream-logo.png")
+    }
+
+    /// Picture from Photos -> small PNG (max 400 px) kept in the app's files.
+    func setLogo(_ data: Data?) {
+        guard let data = data, let img = UIImage(data: data) else {
+            logoImage = nil; logoBase64 = ""
+            try? FileManager.default.removeItem(at: Self.logoFile)
+            return
+        }
+        let s = min(1, 400 / max(img.size.width, img.size.height))
+        let size = CGSize(width: max(1, img.size.width * s), height: max(1, img.size.height * s))
+        let f = UIGraphicsImageRendererFormat()
+        f.scale = 1
+        let small = UIGraphicsImageRenderer(size: size, format: f).image { _ in img.draw(in: CGRect(origin: .zero, size: size)) }
+        guard let png = small.pngData() else { return }
+        try? png.write(to: Self.logoFile)
+        logoImage = small
+        logoBase64 = png.base64EncodedString()
+    }
+
     // live controls (sent to the broadcast every second while the app is open)
     @Published var privacy = false
     @Published var micMuted = false
@@ -178,6 +210,17 @@ final class AppModel: ObservableObject {
         portrait = defaults.bool(forKey: "portrait")
         if defaults.object(forKey: "micVolume") != nil { micVolume = defaults.double(forKey: "micVolume") }
         if defaults.object(forKey: "gameVolume") != nil { gameVolume = defaults.double(forKey: "gameVolume") }
+        fit = defaults.string(forKey: "look.fit") ?? "blur"
+        if defaults.object(forKey: "look.logoCorner") != nil { logoCorner = defaults.integer(forKey: "look.logoCorner") }
+        if defaults.object(forKey: "look.logoScale") != nil { logoScale = defaults.double(forKey: "look.logoScale") }
+        banner = defaults.string(forKey: "look.banner") ?? ""
+        bannerColor = defaults.integer(forKey: "look.bannerColor")
+        if defaults.object(forKey: "look.badge") != nil { badge = defaults.bool(forKey: "look.badge") }
+        brbText = defaults.string(forKey: "look.brb") ?? "Be right back"
+        if let png = try? Data(contentsOf: Self.logoFile), let img = UIImage(data: png) {
+            logoImage = img
+            logoBase64 = png.base64EncodedString()
+        }
     }
 
     var quality: Quality { Quality.find(qualityID) }
@@ -198,6 +241,14 @@ final class AppModel: ObservableObject {
         c.gameVolume = gameVolume
         c.privacy = privacy
         c.micMuted = micMuted
+        c.fit = fit
+        c.logo = logoBase64
+        c.logoCorner = logoCorner
+        c.logoScale = logoScale
+        c.banner = banner.trimmingCharacters(in: .whitespacesAndNewlines)
+        c.bannerColor = bannerColor
+        c.badge = badge
+        c.brbText = brbText
         return c
     }
 

@@ -1,12 +1,13 @@
 // "Go Live" mode: the iPhone streams by itself to Facebook / YouTube / any
 // RTMP(S) server - no laptop. Like PRISM Live Studio, but with a stream key.
 //
-//   ReplayKit frame -> FrameShaper (rotate upright + fit 16:9 / 9:16) ->
+//   ReplayKit frame -> Compositor (upright, fit/blur/fill, logo, banner, LIVE badge) ->
 //   HaishinKit MediaMixer + RTMPStream (H.264 + AAC) -> RTMPS to the platform
 //   game sound (track 1) + iPhone mic (track 0) are mixed by HaishinKit.
 //
 // Library: HaishinKit 2.2.5 (BSD-3-Clause), https://github.com/HaishinKit/HaishinKit.swift
 
+import CoreImage
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -73,130 +74,218 @@ enum ConfigFetcher {
     }
 }
 
-// MARK: - rotate + fit frames
+// MARK: - stream look: rotate, fit, overlays (GPU, Core Image)
 
-/// Makes every ReplayKit frame upright and exactly width x height
-/// (black bars when the shapes differ), using the GPU (VideoToolbox).
-final class FrameShaper {
+/// The look settings the compositor uses (copied from LiveConfig).
+struct StreamLook: Equatable {
+    var fit = "blur"
+    var logo = ""
+    var logoCorner = 1
+    var logoScale = 0.16
+    var banner = ""
+    var bannerColor = 0
+    var badge = true
+    var brbText = "Be right back"
+
+    init() {}
+    init(_ c: LiveConfig) {
+        fit = c.fit; logo = c.logo; logoCorner = c.logoCorner; logoScale = c.logoScale
+        banner = c.banner; bannerColor = c.bannerColor; badge = c.badge; brbText = c.brbText
+    }
+}
+
+/// Builds every frame the viewers see: the game picture turned upright and
+/// fitted into the stream size, plus logo, lower-third banner, LIVE badge,
+/// or the "Be right back" card. Output: BGRA frames of exactly width x height.
+final class Compositor {
     let width: Int
     let height: Int
-    private var rotation: VTPixelRotationSession?
-    private var transfer: VTPixelTransferSession?
-    private var rotatedPool: CVPixelBufferPool?
-    private var rotatedKey = ""
-    private var outPool: CVPixelBufferPool?
-    private var format: CMVideoFormatDescription?
-    private var card: CVPixelBuffer?
+    private let canvas: CGRect
+    private let ctx = CIContext(options: [.cacheIntermediates: false, .name: "live"])
+    private let rgb = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    private var pool: CVPixelBufferPool?
+    private let lock = NSLock()
 
-    init(width: Int, height: Int) {
+    private var look = StreamLook()
+    private var logoImage: CIImage?       // already sized + placed
+    private var bannerImage: CIImage?
+    private var cardImage: CIImage?
+    private var badgeImage: CIImage?
+    private var badgeSecond = -1
+
+    init(width: Int, height: Int, look: StreamLook) {
         self.width = width
         self.height = height
-        VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &transfer)
-        if let t = transfer {
-            VTSessionSetProperty(t, key: kVTPixelTransferPropertyKey_ScalingMode, value: kVTScalingMode_Letterbox)
-        }
-        VTPixelRotationSessionCreate(nil, &rotation)
-    }
-
-    deinit {
-        if let t = transfer { VTPixelTransferSessionInvalidate(t) }
-        if let r = rotation { VTPixelRotationSessionInvalidate(r) }
-    }
-
-    private static func pool(_ w: Int, _ h: Int, _ fmt: OSType) -> CVPixelBufferPool? {
+        canvas = CGRect(x: 0, y: 0, width: width, height: height)
         let attrs: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: fmt,
-            kCVPixelBufferWidthKey as String: w,
-            kCVPixelBufferHeightKey as String: h,
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
             kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()
         ]
-        var p: CVPixelBufferPool?
-        CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey as String: 3] as CFDictionary,
-                                attrs as CFDictionary, &p)
-        return p
+        CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey as String: 4] as CFDictionary,
+                                attrs as CFDictionary, &pool)
+        apply(look)
     }
 
-    /// orientation = CGImagePropertyOrientation from ReplayKit (1 up, 3 down, 6 / 8 sideways)
-    func shape(_ src: CVPixelBuffer, orientation: UInt8, pts: CMTime) -> CMSampleBuffer? {
-        let fmt = CVPixelBufferGetPixelFormatType(src)
-        var upright = src
-        let turn: CFString?
-        var quarter = true                       // 90 degree turn: width and height swap
-        switch orientation {
-        case 3, 4: turn = kVTRotation_180; quarter = false
-        case 5, 6: turn = kVTRotation_CCW90
-        case 7, 8: turn = kVTRotation_CW90
-        default: turn = nil
-        }
-        if let turn = turn, let rot = rotation {
-            let sw = CVPixelBufferGetWidth(src), sh = CVPixelBufferGetHeight(src)
-            let (rw, rh) = quarter ? (sh, sw) : (sw, sh)
-            let key = "\(rw)x\(rh)/\(fmt)"
-            if key != rotatedKey { rotatedPool = Self.pool(rw, rh, fmt); rotatedKey = key }
-            var dst: CVPixelBuffer?
-            if let p = rotatedPool { CVPixelBufferPoolCreatePixelBuffer(nil, p, &dst) }
-            guard let d = dst else { return nil }
-            VTSessionSetProperty(rot, key: kVTPixelRotationPropertyKey_Rotation, value: turn)
-            guard VTPixelRotationSessionRotateImage(rot, src, d) == noErr else { return nil }
-            upright = d
-        }
-        if outPool == nil { outPool = Self.pool(width, height, fmt) }
-        var out: CVPixelBuffer?
-        if let p = outPool { CVPixelBufferPoolCreatePixelBuffer(nil, p, &out) }
-        guard let o = out, let t = transfer, VTPixelTransferSessionTransferImage(t, from: upright, to: o) == noErr
-        else { return nil }
-        return Self.sampleBuffer(o, pts: pts, format: &format)
+    /// New settings from the app (only rebuilds what changed).
+    func update(_ new: StreamLook) {
+        lock.lock(); defer { lock.unlock() }
+        if new != look { apply(new) }
     }
 
-    /// "Be right back" picture (made once, in the same pixel format as the
-    /// screen frames so the encoder never sees a format change).
-    func privacyCard(like src: CVPixelBuffer) -> CVPixelBuffer? {
-        if let c = card { return c }
-        let fmt = CVPixelBufferGetPixelFormatType(src)
-        var bgra: CVPixelBuffer?
-        CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA,
-                            [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()] as CFDictionary, &bgra)
-        guard let b = bgra else { return nil }
-        CVPixelBufferLockBaseAddress(b, [])
-        if let ctx = CGContext(data: CVPixelBufferGetBaseAddress(b), width: width, height: height, bitsPerComponent: 8,
-                               bytesPerRow: CVPixelBufferGetBytesPerRow(b), space: CGColorSpaceCreateDeviceRGB(),
-                               bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) {
-            Self.drawCard(ctx, width: CGFloat(width), height: CGFloat(height))
+    private func apply(_ new: StreamLook) {
+        let old = look
+        look = new
+        let W = CGFloat(width), H = CGFloat(height)
+        if new.logo != old.logo || new.logoCorner != old.logoCorner || new.logoScale != old.logoScale || logoImage == nil {
+            logoImage = nil
+            if !new.logo.isEmpty, let d = Data(base64Encoded: new.logo), let ui = UIImage(data: d), let ci = CIImage(image: ui) {
+                let h = H * CGFloat(min(max(new.logoScale, 0.05), 0.4))
+                let s = h / max(ci.extent.height, 1)
+                let img = ci.transformed(by: CGAffineTransform(scaleX: s, y: s))
+                let m = H * 0.035
+                let x = new.logoCorner % 2 == 0 ? m : W - img.extent.width - m
+                let y = new.logoCorner < 2 ? H - img.extent.height - m : m      // Core Image: y goes up
+                logoImage = img.transformed(by: CGAffineTransform(translationX: x - img.extent.minX, y: y - img.extent.minY))
+            }
         }
-        CVPixelBufferUnlockBaseAddress(b, [])
-        if outPool == nil { outPool = Self.pool(width, height, fmt) }
+        if new.banner != old.banner || new.bannerColor != old.bannerColor || bannerImage == nil {
+            bannerImage = new.banner.isEmpty ? nil : Self.bannerImage(new.banner, color: new.bannerColor, W: W, H: H)
+        }
+        if new.brbText != old.brbText || cardImage == nil {
+            cardImage = Self.cardImage(new.brbText, W: W, H: H)
+        }
+        badgeSecond = -1
+    }
+
+    /// src = ReplayKit frame (nil = card only). seconds = time on air (nil = not live yet).
+    func render(_ src: CVPixelBuffer?, orientation: UInt8, privacy: Bool, seconds: Int?) -> CVPixelBuffer? {
+        lock.lock(); defer { lock.unlock() }
         var out: CVPixelBuffer?
-        if let p = outPool { CVPixelBufferPoolCreatePixelBuffer(nil, p, &out) }
-        guard let o = out, let t = transfer, VTPixelTransferSessionTransferImage(t, from: b, to: o) == noErr else { return nil }
-        card = o
+        if let p = pool { CVPixelBufferPoolCreatePixelBuffer(nil, p, &out) }
+        guard let o = out else { return nil }
+
+        var frame: CIImage
+        if privacy || src == nil {
+            frame = cardImage ?? CIImage(color: .black).cropped(to: canvas)
+        } else {
+            frame = picture(src!, orientation: orientation)
+        }
+        if let b = bannerImage, !privacy { frame = b.composited(over: frame) }
+        if let l = logoImage { frame = l.composited(over: frame) }
+        if look.badge, let s = seconds {
+            if s != badgeSecond { badgeImage = Self.badgeImage(s, W: CGFloat(width), H: CGFloat(height), logoCorner: look.logoCorner, hasLogo: logoImage != nil); badgeSecond = s }
+            if let b = badgeImage { frame = b.composited(over: frame) }
+        }
+        ctx.render(frame.cropped(to: canvas), to: o, bounds: canvas, colorSpace: rgb)
         return o
     }
 
-    private static func drawCard(_ ctx: CGContext, width w: CGFloat, height h: CGFloat) {
-        let space = CGColorSpaceCreateDeviceRGB()
-        let colors = [UIColor(red: 0.10, green: 0.05, blue: 0.20, alpha: 1).cgColor,
-                      UIColor(red: 0.45, green: 0.08, blue: 0.20, alpha: 1).cgColor] as CFArray
-        if let g = CGGradient(colorsSpace: space, colors: colors, locations: [0, 1]) {
-            ctx.drawLinearGradient(g, start: .zero, end: CGPoint(x: w, y: h), options: [])
+    private func picture(_ src: CVPixelBuffer, orientation: UInt8) -> CIImage {
+        let W = CGFloat(width), H = CGFloat(height)
+        var img = CIImage(cvPixelBuffer: src)
+        if let o = CGImagePropertyOrientation(rawValue: UInt32(orientation)), o != .up { img = img.oriented(o) }
+        img = img.transformed(by: CGAffineTransform(translationX: -img.extent.minX, y: -img.extent.minY))
+        let e = img.extent
+        let sFit = min(W / e.width, H / e.height)
+        let sFill = max(W / e.width, H / e.height)
+
+        func placed(_ s: CGFloat, in w: CGFloat, _ h: CGFloat) -> CIImage {
+            let i = img.transformed(by: CGAffineTransform(scaleX: s, y: s))
+            return i.transformed(by: CGAffineTransform(translationX: (w - i.extent.width) / 2 - i.extent.minX,
+                                                       y: (h - i.extent.height) / 2 - i.extent.minY))
         }
-        // UIKit text is drawn top-down: flip the context
-        ctx.translateBy(x: 0, y: h)
-        ctx.scaleBy(x: 1, y: -1)
-        UIGraphicsPushContext(ctx)
-        let short = min(w, h)
-        let center = NSMutableParagraphStyle()
-        center.alignment = .center
-        let title: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: short * 0.12, weight: .heavy),
-            .foregroundColor: UIColor.white, .paragraphStyle: center]
-        let sub: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: short * 0.05, weight: .semibold),
-            .foregroundColor: UIColor(white: 1, alpha: 0.75), .paragraphStyle: center]
-        ("\u{23F8}  Be right back" as NSString)
-            .draw(in: CGRect(x: 0, y: h * 0.5 - short * 0.13, width: w, height: short * 0.16), withAttributes: title)
-        ("Stay tuned \u{2014} the stream is still on" as NSString)
-            .draw(in: CGRect(x: 0, y: h * 0.5 + short * 0.05, width: w, height: short * 0.08), withAttributes: sub)
-        UIGraphicsPopContext()
+        switch look.fit {
+        case "fill":
+            return placed(sFill, in: W, H).cropped(to: canvas)
+        case "fit":
+            return placed(sFit, in: W, H).composited(over: CIImage(color: .black).cropped(to: canvas))
+        default:   // blur: blurred, zoomed copy behind the fitted picture (blurred small = cheap)
+            let q: CGFloat = 0.2
+            let small = placed(sFill * q, in: W * q, H * q)
+            let bg = small.clampedToExtent()
+                .applyingGaussianBlur(sigma: 6)
+                .cropped(to: CGRect(x: 0, y: 0, width: W * q, height: H * q))
+                .transformed(by: CGAffineTransform(scaleX: 1 / q, y: 1 / q))
+                .applyingFilter("CIColorControls", parameters: [kCIInputBrightnessKey: -0.18, kCIInputSaturationKey: 1.15])
+                .cropped(to: canvas)
+            return placed(sFit, in: W, H).composited(over: bg.composited(over: CIImage(color: .black).cropped(to: canvas)))
+        }
+    }
+
+    // MARK: overlay pictures (drawn with UIKit once, then reused)
+
+    private static func ciImage(_ size: CGSize, _ draw: (CGContext) -> Void) -> CIImage? {
+        let f = UIGraphicsImageRendererFormat()
+        f.scale = 1
+        f.opaque = false
+        let ui = UIGraphicsImageRenderer(size: size, format: f).image { draw($0.cgContext) }
+        return CIImage(image: ui)
+    }
+
+    static let bannerColors: [UIColor] = [
+        UIColor(red: 0.92, green: 0.16, blue: 0.30, alpha: 0.92), UIColor(red: 0.15, green: 0.40, blue: 0.95, alpha: 0.92),
+        UIColor(white: 0.05, alpha: 0.82), UIColor(red: 0.50, green: 0.25, blue: 0.95, alpha: 0.92)]
+
+    private static func bannerImage(_ text: String, color: Int, W: CGFloat, H: CGFloat) -> CIImage? {
+        let short = min(W, H)
+        let font = UIFont.systemFont(ofSize: short * 0.055, weight: .heavy)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
+        let textW = min((text as NSString).size(withAttributes: attrs).width, W * 0.86)
+        let size = CGSize(width: textW + short * 0.08, height: short * 0.1)
+        guard let img = ciImage(size, { _ in
+            let r = CGRect(origin: .zero, size: size)
+            bannerColors[min(max(color, 0), bannerColors.count - 1)].setFill()
+            UIBezierPath(roundedRect: r, cornerRadius: size.height * 0.3).fill()
+            (text as NSString).draw(with: CGRect(x: short * 0.04, y: (size.height - font.lineHeight) / 2, width: textW, height: font.lineHeight),
+                                    options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin], attributes: attrs, context: nil)
+        }) else { return nil }
+        return img.transformed(by: CGAffineTransform(translationX: (W - size.width) / 2, y: H * 0.05))
+    }
+
+    private static func badgeImage(_ s: Int, W: CGFloat, H: CGFloat, logoCorner: Int, hasLogo: Bool) -> CIImage? {
+        let short = min(W, H)
+        let text = "LIVE  " + (s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
+                                         : String(format: "%02d:%02d", s / 60, s % 60))
+        let font = UIFont.monospacedDigitSystemFont(ofSize: short * 0.04, weight: .heavy)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
+        let tw = (text as NSString).size(withAttributes: attrs).width
+        let size = CGSize(width: tw + short * 0.075, height: short * 0.066)
+        guard let img = ciImage(size, { _ in
+            UIColor(red: 1, green: 0.17, blue: 0.33, alpha: 0.95).setFill()
+            UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: size.height / 2).fill()
+            UIColor.white.setFill()
+            let d = size.height * 0.28
+            UIBezierPath(ovalIn: CGRect(x: short * 0.022, y: (size.height - d) / 2, width: d, height: d)).fill()
+            (text as NSString).draw(at: CGPoint(x: short * 0.05, y: (size.height - font.lineHeight) / 2), withAttributes: attrs)
+        }) else { return nil }
+        let m = H * 0.035
+        let left = !(hasLogo && logoCorner == 0)          // top-left unless the logo is there
+        let x = left ? m : W - size.width - m
+        return img.transformed(by: CGAffineTransform(translationX: x, y: H - size.height - m))
+    }
+
+    private static func cardImage(_ title: String, W: CGFloat, H: CGFloat) -> CIImage? {
+        let size = CGSize(width: W, height: H)
+        return ciImage(size) { c in
+            let colors = [UIColor(red: 0.10, green: 0.05, blue: 0.22, alpha: 1).cgColor,
+                          UIColor(red: 0.50, green: 0.08, blue: 0.24, alpha: 1).cgColor] as CFArray
+            if let g = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                c.drawLinearGradient(g, start: .zero, end: CGPoint(x: W, y: H), options: [])
+            }
+            let short = min(W, H)
+            let center = NSMutableParagraphStyle()
+            center.alignment = .center
+            let t: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: short * 0.11, weight: .heavy),
+                                                    .foregroundColor: UIColor.white, .paragraphStyle: center]
+            let sub: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: short * 0.045, weight: .semibold),
+                                                      .foregroundColor: UIColor(white: 1, alpha: 0.75), .paragraphStyle: center]
+            let name = title.isEmpty ? "Be right back" : title
+            (name as NSString).draw(in: CGRect(x: W * 0.05, y: H * 0.5 - short * 0.14, width: W * 0.9, height: short * 0.16), withAttributes: t)
+            ("Stay tuned \u{2014} the stream is still on" as NSString)
+                .draw(in: CGRect(x: 0, y: H * 0.5 + short * 0.05, width: W, height: short * 0.08), withAttributes: sub)
+        }
     }
 
     static func sampleBuffer(_ px: CVPixelBuffer, pts: CMTime, format: inout CMVideoFormatDescription?) -> CMSampleBuffer? {
@@ -219,7 +308,7 @@ final class LiveStreamer: @unchecked Sendable {
     var onFatal: ((String) -> Void)?
 
     private let cfg: LiveConfig
-    private let shaper: FrameShaper
+    private let compositor: Compositor
     private let mixer = MediaMixer(captureSessionMode: .manual, multiTrackAudioMixingEnabled: true)
     private var session: (any Session)?
     private let statusServer = MirrorServer(port: LinkPorts.status)
@@ -233,21 +322,20 @@ final class LiveStreamer: @unchecked Sendable {
     private var startedAt: Date?
     private var stopped = false
     private var lastPTS = CMTime.invalid
-    private var lastFrame: CVPixelBuffer?
+    private var lastSource: CVPixelBuffer?          // last game frame (re-drawn while the screen is still)
+    private var lastOrient: UInt8 = 1
     private var lastFrameTime = CFAbsoluteTimeGetCurrent()
-    private var repeatFormat: CMVideoFormatDescription?
+    private var format: CMVideoFormatDescription?
     private var framesThisSecond = 0
     private var micSeen = false
     private var privacy = false             // live controls from the app
     private var micMuted = false
-    private var privacyFrame: CVPixelBuffer?
-    private var repeatPrivacyFormat: CMVideoFormatDescription?
     private var idleTimer: DispatchSourceTimer?
     private let minFrameGap: Double
 
     init(config: LiveConfig) {
         cfg = config
-        shaper = FrameShaper(width: config.width, height: config.height)
+        compositor = Compositor(width: config.width, height: config.height, look: StreamLook(config))
         minFrameGap = 1.0 / Double(max(1, config.fps)) - 0.004
         status.width = config.width
         status.height = config.height
@@ -405,22 +493,11 @@ final class LiveStreamer: @unchecked Sendable {
             if let n = CMGetAttachment(sb, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber {
                 orient = n.uint8Value
             }
-            lock.lock(); let hide = privacy; lock.unlock()
-            let shaped: CMSampleBuffer
-            if hide {
-                // privacy screen: viewers see the card, not your screen
-                guard let card = shaper.privacyCard(like: px),
-                      let sb2 = FrameShaper.sampleBuffer(card, pts: pts, format: &repeatPrivacyFormat) else { return }
-                lock.lock(); privacyFrame = card; lock.unlock()
-                shaped = sb2
-            } else {
-                guard let sb2 = shaper.shape(px, orientation: orient, pts: pts) else { return }
-                shaped = sb2
-            }
+            guard let shaped = compose(px, orient: orient, pts: pts) else { return }
             lastPTS = pts
             lock.lock()
-            lastFrame = CMSampleBufferGetImageBuffer(shaped)
-            lastFrameTime = CFAbsoluteTimeGetCurrent()
+            lastSource = px
+            lastOrient = orient
             framesThisSecond += 1
             lock.unlock()
             feed.yield((shaped, 0))
@@ -435,6 +512,18 @@ final class LiveStreamer: @unchecked Sendable {
         }
     }
 
+    /// One finished frame (privacy card or game picture + overlays).
+    private func compose(_ px: CVPixelBuffer?, orient: UInt8, pts: CMTime) -> CMSampleBuffer? {
+        lock.lock()
+        let hide = privacy
+        let seconds = startedAt.map { Int(Date().timeIntervalSince($0)) }
+        lock.unlock()
+        guard let out = compositor.render(px, orientation: orient, privacy: hide, seconds: seconds) else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        lastFrameTime = CFAbsoluteTimeGetCurrent()
+        return Compositor.sampleBuffer(out, pts: pts, format: &format)
+    }
+
     /// A still screen gives no new frames; platforms then think the stream
     /// died. Repeat the last frame every 0.25 s while nothing changes.
     private func startIdleTimer() {
@@ -444,14 +533,12 @@ final class LiveStreamer: @unchecked Sendable {
             guard let self = self, let feed = self.feed else { return }
             self.lock.lock()
             let idle = CFAbsoluteTimeGetCurrent() - self.lastFrameTime > 0.4
-            let frame = (self.privacy ? self.privacyFrame : nil) ?? self.lastFrame
+            let src = self.lastSource, orient = self.lastOrient
             self.lock.unlock()
-            guard idle, let px = frame else { return }
+            guard idle else { return }
+            // re-draw (so new look / privacy / timer show even on a still screen)
             let pts = CMClockGetTime(CMClockGetHostTimeClock())
-            if let sb = FrameShaper.sampleBuffer(px, pts: pts, format: &self.repeatFormat) {
-                self.lock.lock(); self.lastFrameTime = CFAbsoluteTimeGetCurrent(); self.lock.unlock()
-                feed.yield((sb, 0))
-            }
+            if let sb = self.compose(src, orient: orient, pts: pts) { feed.yield((sb, 0)) }
         }
         t.resume()
         idleTimer = t
@@ -470,6 +557,7 @@ final class LiveStreamer: @unchecked Sendable {
             self.privacy = c.privacy
             self.micMuted = c.micMuted
             self.lock.unlock()
+            self.compositor.update(StreamLook(c))
         }
         let session = self.session
         Task {

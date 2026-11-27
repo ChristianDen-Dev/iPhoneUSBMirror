@@ -38,7 +38,7 @@ SCRCPY_SHA256 = "b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a
 SIDELOADLY_URL = "https://sideloadly.io/SideloadlySetup64.exe"
 
 APP_FILES = ["mirror.py", "core.py", "android.py", "audio_player.py", "recorder.py", "ui.py", "winutil.py",
-             "check_device.py", "setup_check.py", "icon.ico", "requirements.txt"]
+             "check_device.py", "setup_check.py", "icon.ico", "icon.png", "requirements.txt"]
 ANDROID_FILES = ["adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "scrcpy-server", "LICENSE.txt"]
 
 

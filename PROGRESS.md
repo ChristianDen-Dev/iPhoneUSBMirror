@@ -175,6 +175,13 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - App, broadcast name, PC window, shortcut, guide renamed to **Den-Dev Live** (bundle IDs unchanged so settings/key stay). Package: `dist\DenDevLive_Portable.zip`. OBS: re-pick the window "[python.exe]: Den-Dev Live".
 - CI 46077753042 OK -> build\DenDevLive.ipa (same as build\iPhoneUSBMirror.ipa).
 
+## Phase 16 - Go Live: no GPU, smooth audio, two mics (2026-11-28)
+- Phone log (pymobiledevice3 syslog) during a live: 24x "IOGPUMetalError ... Impacting Interactivity" from CIRenderTask: iOS cancels the extension's GPU work while Mobile Legends uses the GPU -> broken frames, stalls, Facebook errors.
+- Compositor rewritten without GPU: VideoToolbox scale/convert + CPU CoreGraphics (rotate, logo, banner, badge, card) + vImage box blur on a 1/10 size copy.
+- Audio "cut by cut": audio pieces were dropped from the shared bufferingNewest queue -> audio has its own unbounded queue (video may skip frames). Smoothing buffer 200 ms (cap 700 ms). Auto level (game target RMS 0.12, up to +12 dB; mic 0.10, up to +9.5 dB; fast down / slow up; no clipping) + soft limiter, so ML voice-chat "call mode" does not make the stream quiet.
+- Two mics: game and mic are independent inputs in AudioClock; either can stop or change format without muting the other. Teammates' voices are part of the game sound; your voice needs Microphone ON in the broadcast sheet.
+- CI 46080680910 OK -> build\DenDevLive.ipa; package rebuilt.
+
 ## Next
 - Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
 - Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.

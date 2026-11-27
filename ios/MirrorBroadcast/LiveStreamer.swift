@@ -1,14 +1,14 @@
 // "Go Live" mode: the iPhone streams by itself to Facebook / YouTube / any
 // RTMP(S) server - no laptop. Like PRISM Live Studio, but with a stream key.
 //
-//   ReplayKit frame -> Compositor (upright, fit/blur/fill, logo, banner, LIVE badge) ->
+//   ReplayKit frame -> Compositor (upright, fit/blur/fill, logo, banner, LIVE badge; no GPU) ->
 //   HaishinKit MediaMixer + RTMPStream (H.264 + AAC) -> RTMPS to the platform
 //   game sound (track 1) + iPhone mic (track 0) are mixed by HaishinKit.
 //
 // Library: HaishinKit 2.2.5 (BSD-3-Clause), https://github.com/HaishinKit/HaishinKit.swift
 
+import Accelerate
 import AVFoundation
-import CoreImage
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -75,7 +75,7 @@ enum ConfigFetcher {
     }
 }
 
-// MARK: - stream look: rotate, fit, overlays (GPU, Core Image)
+// MARK: - stream look: rotate, fit, overlays (NO GPU)
 
 /// The look settings the compositor uses (copied from LiveConfig).
 struct StreamLook: Equatable {
@@ -95,38 +95,70 @@ struct StreamLook: Equatable {
     }
 }
 
-/// Builds every frame the viewers see: the game picture turned upright and
-/// fitted into the stream size, plus logo, lower-third banner, LIVE badge,
-/// or the "Be right back" card. Output: BGRA frames of exactly width x height.
+/// Builds every frame the viewers see. It does NOT use the GPU: iOS cancels a
+/// broadcast extension's GPU work when a game needs the GPU (seen in the phone
+/// log as "IOGPUMetalError ... Impacting Interactivity"), which broke the live.
+///   - resizing + colour conversion: VideoToolbox (the phone's video scaler)
+///   - turning upright, blurred background, logo / banner / badge: CPU drawing
+/// Output: BGRA frames of exactly width x height.
 final class Compositor {
     let width: Int
     let height: Int
-    private let canvas: CGRect
-    private let ctx = CIContext(options: [.cacheIntermediates: false, .name: "live"])
-    private let rgb = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-    private var pool: CVPixelBufferPool?
+    private let W: CGFloat
+    private let H: CGFloat
+    private let rgb = CGColorSpaceCreateDeviceRGB()
+    private let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+    private var canvasPool: CVPixelBufferPool?
+    private var transfer: VTPixelTransferSession?
+    private var pools: [String: CVPixelBufferPool] = [:]
+    private var blurTemp: UnsafeMutableRawPointer?
+    private var blurTempSize = 0
     private let lock = NSLock()
 
     private var look = StreamLook()
-    private var logoImage: CIImage?       // already sized + placed
-    private var bannerImage: CIImage?
-    private var cardImage: CIImage?
-    private var badgeImage: CIImage?
+    private var logo: (CGImage, CGRect)?
+    private var banner: (CGImage, CGRect)?
+    private var card: CGImage?
+    private var badge: (CGImage, CGRect)?
     private var badgeSecond = -1
 
     init(width: Int, height: Int, look: StreamLook) {
         self.width = width
         self.height = height
-        canvas = CGRect(x: 0, y: 0, width: width, height: height)
+        W = CGFloat(width)
+        H = CGFloat(height)
+        canvasPool = Self.makePool(width, height)
+        VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &transfer)
+        apply(look)
+    }
+
+    deinit {
+        if let t = transfer { VTPixelTransferSessionInvalidate(t) }
+        blurTemp?.deallocate()
+    }
+
+    private static func makePool(_ w: Int, _ h: Int) -> CVPixelBufferPool? {
         let attrs: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: width,
-            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferWidthKey as String: w,
+            kCVPixelBufferHeightKey as String: h,
             kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()
         ]
-        CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey as String: 4] as CFDictionary,
-                                attrs as CFDictionary, &pool)
-        apply(look)
+        var p: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey as String: 3] as CFDictionary,
+                                attrs as CFDictionary, &p)
+        return p
+    }
+
+    private func buffer(_ w: Int, _ h: Int) -> CVPixelBuffer? {
+        let key = "\(w)x\(h)"
+        if pools[key] == nil {
+            if pools.count > 6 { pools.removeAll() }
+            pools[key] = Self.makePool(w, h)
+        }
+        var b: CVPixelBuffer?
+        if let p = pools[key] { CVPixelBufferPoolCreatePixelBuffer(nil, p, &b) }
+        return b
     }
 
     /// New settings from the app (only rebuilds what changed).
@@ -138,24 +170,22 @@ final class Compositor {
     private func apply(_ new: StreamLook) {
         let old = look
         look = new
-        let W = CGFloat(width), H = CGFloat(height)
-        if new.logo != old.logo || new.logoCorner != old.logoCorner || new.logoScale != old.logoScale || logoImage == nil {
-            logoImage = nil
-            if !new.logo.isEmpty, let d = Data(base64Encoded: new.logo), let ui = UIImage(data: d), let ci = CIImage(image: ui) {
+        if new.logo != old.logo || new.logoCorner != old.logoCorner || new.logoScale != old.logoScale || logo == nil {
+            logo = nil
+            if !new.logo.isEmpty, let d = Data(base64Encoded: new.logo), let ui = UIImage(data: d), let cg = ui.cgImage {
                 let h = H * CGFloat(min(max(new.logoScale, 0.05), 0.4))
-                let s = h / max(ci.extent.height, 1)
-                let img = ci.transformed(by: CGAffineTransform(scaleX: s, y: s))
+                let w = h * CGFloat(cg.width) / CGFloat(max(cg.height, 1))
                 let m = H * 0.035
-                let x = new.logoCorner % 2 == 0 ? m : W - img.extent.width - m
-                let y = new.logoCorner < 2 ? H - img.extent.height - m : m      // Core Image: y goes up
-                logoImage = img.transformed(by: CGAffineTransform(translationX: x - img.extent.minX, y: y - img.extent.minY))
+                let x = new.logoCorner % 2 == 0 ? m : W - w - m
+                let y = new.logoCorner < 2 ? H - h - m : m          // drawing: y goes up
+                logo = (cg, CGRect(x: x, y: y, width: w, height: h))
             }
         }
-        if new.banner != old.banner || new.bannerColor != old.bannerColor || bannerImage == nil {
-            bannerImage = new.banner.isEmpty ? nil : Self.bannerImage(new.banner, color: new.bannerColor, W: W, H: H)
+        if new.banner != old.banner || new.bannerColor != old.bannerColor || banner == nil {
+            banner = new.banner.isEmpty ? nil : Self.bannerImage(new.banner, color: new.bannerColor, W: W, H: H)
         }
-        if new.brbText != old.brbText || cardImage == nil {
-            cardImage = Self.cardImage(new.brbText, W: W, H: H)
+        if new.brbText != old.brbText || card == nil {
+            card = Self.cardImage(new.brbText, W: W, H: H)
         }
         badgeSecond = -1
     }
@@ -164,95 +194,144 @@ final class Compositor {
     func render(_ src: CVPixelBuffer?, orientation: UInt8, privacy: Bool, seconds: Int?) -> CVPixelBuffer? {
         lock.lock(); defer { lock.unlock() }
         var out: CVPixelBuffer?
-        if let p = pool { CVPixelBufferPoolCreatePixelBuffer(nil, p, &out) }
+        if let p = canvasPool { CVPixelBufferPoolCreatePixelBuffer(nil, p, &out) }
         guard let o = out else { return nil }
+        CVPixelBufferLockBaseAddress(o, [])
+        defer { CVPixelBufferUnlockBaseAddress(o, []) }
+        guard let ctx = CGContext(data: CVPixelBufferGetBaseAddress(o), width: width, height: height, bitsPerComponent: 8,
+                                  bytesPerRow: CVPixelBufferGetBytesPerRow(o), space: rgb, bitmapInfo: bitmapInfo) else { return nil }
+        let canvas = CGRect(x: 0, y: 0, width: W, height: H)
+        ctx.setFillColor(UIColor.black.cgColor)
+        ctx.fill(canvas)
 
-        var frame: CIImage
         if privacy || src == nil {
-            frame = cardImage ?? CIImage(color: .black).cropped(to: canvas)
+            if let c = card { ctx.interpolationQuality = .none; ctx.draw(c, in: canvas) }
         } else {
-            frame = picture(src!, orientation: orientation)
+            drawPicture(ctx, src!, orientation: orientation)
         }
-        if let b = bannerImage, !privacy { frame = b.composited(over: frame) }
-        if let l = logoImage { frame = l.composited(over: frame) }
+        ctx.interpolationQuality = .medium
+        if let b = banner, !privacy { ctx.draw(b.0, in: b.1) }
+        if let l = logo { ctx.draw(l.0, in: l.1) }
         if look.badge, let s = seconds {
-            if s != badgeSecond { badgeImage = Self.badgeImage(s, W: CGFloat(width), H: CGFloat(height), logoCorner: look.logoCorner, hasLogo: logoImage != nil); badgeSecond = s }
-            if let b = badgeImage { frame = b.composited(over: frame) }
+            if s != badgeSecond {
+                badge = Self.badgeImage(s, W: W, H: H, logoCorner: look.logoCorner, hasLogo: logo != nil)
+                badgeSecond = s
+            }
+            if let b = badge { ctx.draw(b.0, in: b.1) }
         }
-        ctx.render(frame.cropped(to: canvas), to: o, bounds: canvas, colorSpace: rgb)
         return o
     }
 
-    private func picture(_ src: CVPixelBuffer, orientation: UInt8) -> CIImage {
-        let W = CGFloat(width), H = CGFloat(height)
-        var img = CIImage(cvPixelBuffer: src)
-        // ReplayKit orientation -> turn needed (same table as the laptop receiver, checked with Mobile Legends):
-        // 3/4 = 180, 5/6 = 90 counter-clockwise, 7/8 = 90 clockwise
-        switch orientation {
-        case 3, 4: img = img.oriented(.down)
-        case 5, 6: img = img.oriented(.left)
-        case 7, 8: img = img.oriented(.right)
-        default: break
-        }
-        img = img.transformed(by: CGAffineTransform(translationX: -img.extent.minX, y: -img.extent.minY))
-        let e = img.extent
-        let sFit = min(W / e.width, H / e.height)
-        let sFill = max(W / e.width, H / e.height)
+    // MARK: game picture
 
-        func placed(_ s: CGFloat, in w: CGFloat, _ h: CGFloat) -> CIImage {
-            let i = img.transformed(by: CGAffineTransform(scaleX: s, y: s))
-            return i.transformed(by: CGAffineTransform(translationX: (w - i.extent.width) / 2 - i.extent.minX,
-                                                       y: (h - i.extent.height) / 2 - i.extent.minY))
+    private func drawPicture(_ ctx: CGContext, _ src: CVPixelBuffer, orientation: UInt8) {
+        // ReplayKit orientation -> turn (same table as the laptop receiver, checked with Mobile Legends):
+        // 3/4 = 180, 5/6 = 90 counter-clockwise, 7/8 = 90 clockwise
+        let angle: CGFloat
+        switch orientation {
+        case 3, 4: angle = .pi
+        case 5, 6: angle = .pi / 2
+        case 7, 8: angle = -.pi / 2
+        default: angle = 0
         }
-        switch look.fit {
-        case "fill":
-            return placed(sFill, in: W, H).cropped(to: canvas)
-        case "fit":
-            return placed(sFit, in: W, H).composited(over: CIImage(color: .black).cropped(to: canvas))
-        default:   // blur: blurred, zoomed copy behind the fitted picture (blurred small = cheap)
-            let q: CGFloat = 0.2
-            let small = placed(sFill * q, in: W * q, H * q)
-            let bg = small.clampedToExtent()
-                .applyingGaussianBlur(sigma: 6)
-                .cropped(to: CGRect(x: 0, y: 0, width: W * q, height: H * q))
-                .transformed(by: CGAffineTransform(scaleX: 1 / q, y: 1 / q))
-                .applyingFilter("CIColorControls", parameters: [kCIInputBrightnessKey: -0.18, kCIInputSaturationKey: 1.15])
-                .cropped(to: canvas)
-            return placed(sFit, in: W, H).composited(over: bg.composited(over: CIImage(color: .black).cropped(to: canvas)))
+        let quarter = abs(angle) == .pi / 2
+        let sw = CGFloat(CVPixelBufferGetWidth(src)), sh = CGFloat(CVPixelBufferGetHeight(src))
+        let uw = quarter ? sh : sw, uh = quarter ? sw : sh          // upright size
+        let sFit = min(W / uw, H / uh), sFill = max(W / uw, H / uh)
+
+        if look.fit == "blur" {
+            // tiny copy -> blur on the CPU -> stretched over the whole picture, a bit darker
+            let tw = max(8, Int(uw * sFill / 10)) & ~1, th = max(8, Int(uh * sFill / 10)) & ~1
+            if let small = scaled(src, uprightW: tw, uprightH: th, quarter: quarter) {
+                blur(small)
+                ctx.interpolationQuality = .low
+                draw(ctx, small, angle: angle, uprightW: uw * sFill, uprightH: uh * sFill)
+                ctx.setFillColor(UIColor(white: 0, alpha: 0.28).cgColor)
+                ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
+            }
+        }
+        let s = look.fit == "fill" ? sFill : sFit
+        let tw = max(2, Int((uw * s).rounded())) & ~1, th = max(2, Int((uh * s).rounded())) & ~1
+        if let pic = scaled(src, uprightW: tw, uprightH: th, quarter: quarter) {
+            ctx.interpolationQuality = .none                      // already the right size
+            draw(ctx, pic, angle: angle, uprightW: CGFloat(tw), uprightH: CGFloat(th))
         }
     }
 
-    // MARK: overlay pictures (drawn with UIKit once, then reused)
+    /// Resize + convert to BGRA with VideoToolbox (no turning yet).
+    private func scaled(_ src: CVPixelBuffer, uprightW: Int, uprightH: Int, quarter: Bool) -> CVPixelBuffer? {
+        let bw = quarter ? uprightH : uprightW, bh = quarter ? uprightW : uprightH
+        guard let t = transfer, let dst = buffer(bw, bh),
+              VTPixelTransferSessionTransferImage(t, from: src, to: dst) == noErr else { return nil }
+        return dst
+    }
 
-    private static func ciImage(_ size: CGSize, _ draw: (CGContext) -> Void) -> CIImage? {
+    /// Draw a BGRA buffer centred and turned upright (no copy of the pixels).
+    private func draw(_ ctx: CGContext, _ buf: CVPixelBuffer, angle: CGFloat, uprightW: CGFloat, uprightH: CGFloat) {
+        CVPixelBufferLockBaseAddress(buf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+        let bw = CVPixelBufferGetWidth(buf), bh = CVPixelBufferGetHeight(buf), bpr = CVPixelBufferGetBytesPerRow(buf)
+        guard let base = CVPixelBufferGetBaseAddress(buf),
+              let provider = CGDataProvider(dataInfo: nil, data: base, size: bpr * bh, releaseData: { _, _, _ in }),
+              let img = CGImage(width: bw, height: bh, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bpr, space: rgb,
+                                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo), provider: provider, decode: nil,
+                                shouldInterpolate: true, intent: .defaultIntent) else { return }
+        let quarter = abs(angle) == .pi / 2
+        let dw = quarter ? uprightH : uprightW, dh = quarter ? uprightW : uprightH   // size before turning
+        ctx.saveGState()
+        ctx.translateBy(x: W / 2, y: H / 2)
+        if angle != 0 { ctx.rotate(by: angle) }
+        ctx.draw(img, in: CGRect(x: -dw / 2, y: -dh / 2, width: dw, height: dh))
+        ctx.restoreGState()
+    }
+
+    private func blur(_ buf: CVPixelBuffer) {
+        CVPixelBufferLockBaseAddress(buf, [])
+        defer { CVPixelBufferUnlockBaseAddress(buf, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buf) else { return }
+        let w = CVPixelBufferGetWidth(buf), h = CVPixelBufferGetHeight(buf), bpr = CVPixelBufferGetBytesPerRow(buf)
+        if blurTempSize < bpr * h {
+            blurTemp?.deallocate()
+            blurTemp = UnsafeMutableRawPointer.allocate(byteCount: bpr * h, alignment: 64)
+            blurTempSize = bpr * h
+        }
+        guard let tmp = blurTemp else { return }
+        var a = vImage_Buffer(data: base, height: vImagePixelCount(h), width: vImagePixelCount(w), rowBytes: bpr)
+        var b = vImage_Buffer(data: tmp, height: vImagePixelCount(h), width: vImagePixelCount(w), rowBytes: bpr)
+        let k: UInt32 = 7
+        vImageBoxConvolve_ARGB8888(&a, &b, nil, 0, 0, k, k, nil, vImage_Flags(kvImageEdgeExtend))
+        vImageBoxConvolve_ARGB8888(&b, &a, nil, 0, 0, k, k, nil, vImage_Flags(kvImageEdgeExtend))
+    }
+
+    // MARK: overlay pictures (drawn once, then reused)
+
+    private static func image(_ size: CGSize, _ draw: (CGContext) -> Void) -> CGImage? {
         let f = UIGraphicsImageRendererFormat()
         f.scale = 1
         f.opaque = false
-        let ui = UIGraphicsImageRenderer(size: size, format: f).image { draw($0.cgContext) }
-        return CIImage(image: ui)
+        return UIGraphicsImageRenderer(size: size, format: f).image { draw($0.cgContext) }.cgImage
     }
 
     static let bannerColors: [UIColor] = [
         UIColor(red: 0.92, green: 0.16, blue: 0.30, alpha: 0.92), UIColor(red: 0.15, green: 0.40, blue: 0.95, alpha: 0.92),
         UIColor(white: 0.05, alpha: 0.82), UIColor(red: 0.50, green: 0.25, blue: 0.95, alpha: 0.92)]
 
-    private static func bannerImage(_ text: String, color: Int, W: CGFloat, H: CGFloat) -> CIImage? {
+    private static func bannerImage(_ text: String, color: Int, W: CGFloat, H: CGFloat) -> (CGImage, CGRect)? {
         let short = min(W, H)
         let font = UIFont.systemFont(ofSize: short * 0.055, weight: .heavy)
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
         let textW = min((text as NSString).size(withAttributes: attrs).width, W * 0.86)
         let size = CGSize(width: textW + short * 0.08, height: short * 0.1)
-        guard let img = ciImage(size, { _ in
-            let r = CGRect(origin: .zero, size: size)
+        guard let img = image(size, { _ in
             bannerColors[min(max(color, 0), bannerColors.count - 1)].setFill()
-            UIBezierPath(roundedRect: r, cornerRadius: size.height * 0.3).fill()
+            UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: size.height * 0.3).fill()
             (text as NSString).draw(with: CGRect(x: short * 0.04, y: (size.height - font.lineHeight) / 2, width: textW, height: font.lineHeight),
                                     options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin], attributes: attrs, context: nil)
         }) else { return nil }
-        return img.transformed(by: CGAffineTransform(translationX: (W - size.width) / 2, y: H * 0.05))
+        return (img, CGRect(x: (W - size.width) / 2, y: H * 0.05, width: size.width, height: size.height))
     }
 
-    private static func badgeImage(_ s: Int, W: CGFloat, H: CGFloat, logoCorner: Int, hasLogo: Bool) -> CIImage? {
+    private static func badgeImage(_ s: Int, W: CGFloat, H: CGFloat, logoCorner: Int, hasLogo: Bool) -> (CGImage, CGRect)? {
         let short = min(W, H)
         let text = "LIVE  " + (s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
                                          : String(format: "%02d:%02d", s / 60, s % 60))
@@ -260,7 +339,7 @@ final class Compositor {
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
         let tw = (text as NSString).size(withAttributes: attrs).width
         let size = CGSize(width: tw + short * 0.075, height: short * 0.066)
-        guard let img = ciImage(size, { _ in
+        guard let img = image(size, { _ in
             UIColor(red: 1, green: 0.17, blue: 0.33, alpha: 0.95).setFill()
             UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: size.height / 2).fill()
             UIColor.white.setFill()
@@ -271,12 +350,11 @@ final class Compositor {
         let m = H * 0.035
         let left = !(hasLogo && logoCorner == 0)          // top-left unless the logo is there
         let x = left ? m : W - size.width - m
-        return img.transformed(by: CGAffineTransform(translationX: x, y: H - size.height - m))
+        return (img, CGRect(x: x, y: H - size.height - m, width: size.width, height: size.height))
     }
 
-    private static func cardImage(_ title: String, W: CGFloat, H: CGFloat) -> CIImage? {
-        let size = CGSize(width: W, height: H)
-        return ciImage(size) { c in
+    private static func cardImage(_ title: String, W: CGFloat, H: CGFloat) -> CGImage? {
+        image(CGSize(width: W, height: H)) { c in
             let colors = [UIColor(red: 0.10, green: 0.05, blue: 0.22, alpha: 1).cgColor,
                           UIColor(red: 0.50, green: 0.08, blue: 0.24, alpha: 1).cgColor] as CFArray
             if let g = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {

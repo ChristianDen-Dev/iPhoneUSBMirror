@@ -132,7 +132,7 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Honest limit: Wi-Fi adds ~5-30 ms and can stutter on busy 2.4 GHz; USB stays the lowest delay. Best wireless: 5 GHz router or the laptop on the iPhone Hotspot.
 
 ## Phase 11 — Android (2026-11-28)
-- No phone app needed: `android.py` uses **adb + scrcpy-server v5.0.1** (Apache 2.0, from the official release, SHA-256 checked) in `receiverendorndroid` (git-ignored; `tools\make_portable.py` downloads it). We do not run scrcpy.exe — our own window/decoder/sound router/recorder are used.
+- No phone app needed: `android.py` uses **adb + scrcpy-server v5.0.1** (Apache 2.0, from the official release, SHA-256 checked) in `receiver\vendor\android` (git-ignored; `tools\make_portable.py` downloads it). We do not run scrcpy.exe — our own window/decoder/sound router/recorder are used.
 - Protocol v5 (read from the v5.0.1 source, not memory): 3 forward sockets video/audio/control; video: dummy byte, 64-byte name, codec id, 12-byte headers (MSB=1 session packet w/h; else bit62 config, bit61 key, 61-bit PTS); audio `raw` = 48 kHz s16le stereo.
 - USB 16 Mbps / Wi-Fi 8 Mbps, max 1920, 60 fps. Sound needs Android 11+. Default `audio_source=output` (phone speaker silent); menu option "keep sound on the phone" = `playback` + `audio_dup` (Android 13+, some games may block it).
 - Control: mouse = finger (touch messages, 32 bytes), Backspace/Home/End = Back/Home/Recents, toolbar buttons when Android is connected.

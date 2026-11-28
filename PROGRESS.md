@@ -223,3 +223,23 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 
 ## Problems / notes
 - Git has no author identity yet. The repo will be public, so after `gh auth login` set a **repo-local** identity with the GitHub noreply email (`<id>+<login>@users.noreply.github.com`), then make the first commit (files are staged).
+
+## Phase 19b - Android = same as iPhone + strong USB (2026-11-28)
+- Problem seen: the TECNO KL5 on USB-C dropped about 30 times in 1.5 h. Windows logged USB
+  re-plug errors ("device not found", VID_0000 descriptor failure); the old scrcpy path
+  died on every blink and needed 10-30 s to come back.
+- Now the Android app works like the iPhone app on USB too: tap USB -> Start mirroring.
+  The laptop reaches the app through `adb forward` (like usbmux), same protocol,
+  picture + game sound + your mic. The capture keeps running on the phone when the cable
+  blinks; the laptop re-forwards and is back in about 1 s.
+- Laptop also: switches from scrcpy to the app as soon as the app starts; moves from
+  Wi-Fi to USB when the cable is plugged in (Android app too); restarts adb once if the
+  phone vanished after a drop; `adb reconnect offline`; small scrcpy helper only for
+  mouse control.
+- App: iPhone bitrate rules (USB 20 Mbps; Wi-Fi 8 Mbps start, 12 -> 3 adaptive), same
+  drop limits, INFO every 5 s (heat, sound, mic, link, bitrate), wake + Wi-Fi locks,
+  MirrorService added to the manifest (was missing). USB / Wi-Fi screens = iPhone screens.
+- Laptop window: "phone" wording for both phones; phone heat shown for Android too.
+- Build 46128778404 OK -> build/DenDevLive.apk, dist zips rebuilt. Real-phone test pending.
+- Not changed (needs a yes): Windows "USB selective suspend" is ON (can cause blinks).
+

@@ -3,11 +3,11 @@ Den-Dev Live - Android
 WHAT IS IN THIS FOLDER
   DenDevLive.apk     the Den-Dev Live app for Android (same app as on the iPhone)
 
-WHAT YOU NEED IT FOR
-  USB mirror to the laptop  -> no app needed (USB debugging, see below)
+WHAT YOU NEED IT FOR (same as the iPhone app)
+  USB mirror to the laptop   -> the app (picture + game sound + your mic)
   Wi-Fi mirror to the laptop -> the app
-  Go Live from the phone    -> the app (Facebook / YouTube / TikTok / RTMP,
-                               Studio look, floating comments over the game)
+  Go Live from the phone     -> the app (Facebook / YouTube / TikTok / RTMP,
+                                Studio look, floating comments over the game)
 
 INSTALL THE APP (about 1 minute)
   1. Copy DenDevLive.apk to the phone (USB cable, Google Drive, Messenger...)
@@ -31,8 +31,14 @@ USB MIRROR - EVERY TIME
   1. Start Den-Dev Live on the laptop (Desktop shortcut).
   2. Plug in the phone. On the phone: "Allow USB debugging?"
      -> tick "Always allow from this computer" -> Allow.
-  3. The phone screen appears on the laptop. The mouse works as your finger.
-     Backspace = Back, Home = Home, End = Recent apps.
+  3. App -> USB -> Start mirroring -> "Entire screen" -> Start now.
+  4. The phone screen + game sound appear on the laptop. The mouse works as
+     your finger. Backspace = Back, Home = Home, End = Recent apps.
+     Your mic: switch "Your mic to the stream" ON in the app (or the bubble).
+  If the cable blinks, the mirror keeps running on the phone and the laptop
+  reconnects by itself in about 1 second.
+  (Without tapping Start mirroring the laptop still shows the screen, but
+  without your mic, and a cable blink takes longer to recover.)
 
 WI-FI MIRROR (with the app)
   Phone and laptop on the same Wi-Fi. App -> Wi-Fi -> Start mirroring ->
@@ -51,5 +57,7 @@ SOUND
 PROBLEMS
   - Phone not found by USB: try another cable / USB port, set the USB mode to
     "File transfer", or install the phone maker's USB driver.
+  - Cable keeps dropping: Developer options -> Default USB configuration ->
+    File transfer; plug straight into the laptop (no hub); use a data cable.
   - No "Allow USB debugging" message: unplug, turn USB debugging off and on, plug in.
   - "App not installed": uninstall the old Den-Dev Live first, then install again.

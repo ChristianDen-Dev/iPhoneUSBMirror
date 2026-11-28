@@ -19,11 +19,13 @@ straight from your iPhone. Free, no watermark, no time limit.
 
 ## Download and install
 
-1. Download `DenDevLive_Portable.zip` (for example from Google Drive).
+1. Download the zip for your phone (for example from Google Drive):
+   - `DenDevLive_iPhone.zip`: laptop program + `2 - iPHONE` (DenDevLive.ipa + Sideloadly)
+   - `DenDevLive_Android.zip`: laptop program + `2 - ANDROID` (steps only, no app needed on Android)
 2. Right-click the zip → Properties → tick **Unblock** → OK → Extract All → `C:\DenDevLive`.
-3. Run **`1 - SETUP (first time).bat`**. It checks the PC and offers Apple Devices, Sideloadly and VB-Cable.
+3. Open `1 - LAPTOP` and run **`1 - SETUP (first time).bat`**. It checks the PC and offers Apple Devices, Sideloadly and VB-Cable.
 4. Start with the Desktop shortcut **Den-Dev Live**.
-5. iPhone: install `installers\DenDevLive.ipa` with Sideloadly (your own Apple ID, typed only into Sideloadly),
+5. iPhone: install `2 - iPHONE\DenDevLive.ipa` with Sideloadly (your own Apple ID, typed only into Sideloadly),
    then trust it in Settings → General → VPN & Device Management, and turn on Developer Mode.
 
 The full illustrated guide is `START HERE (guide).html` in the package.
@@ -41,7 +43,7 @@ The full illustrated guide is `START HERE (guide).html` in the package.
 ## Build
 
 - iPhone app: push to `main` → GitHub Actions builds `iPhoneUSBMirror-ipa` (unsigned, sign it with Sideloadly).
-- PC package: `receiver\.venv\Scripts\python.exe tools\make_portable.py` → `dist\DenDevLive_Portable.zip`.
+- PC package: `receiver\.venv\Scripts\python.exe tools\make_portable.py` → `dist\DenDevLive_iPhone.zip` and `dist\DenDevLive_Android.zip`.
 
 ## Privacy
 

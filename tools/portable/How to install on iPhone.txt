@@ -1,0 +1,37 @@
+Den-Dev Live - install the app on the iPhone
+=============================================
+The app is not on the App Store. You put it on your iPhone from the laptop
+with Sideloadly, using your own free Apple ID.
+
+WHAT IS IN THIS FOLDER
+  DenDevLive.ipa          the iPhone app
+  SideloadlySetup64.exe   Sideloadly (the program that installs the app)
+
+NEEDED ON THE LAPTOP FIRST
+  - Apple Devices (or iTunes) so the laptop sees the iPhone.
+    "1 - LAPTOP\1 - SETUP (first time).bat" checks and offers it.
+  - Sideloadly: double-click SideloadlySetup64.exe (or let SETUP do it).
+
+INSTALL (about 3 minutes)
+  1. Plug the iPhone into the laptop with the cable. Unlock it.
+     If the iPhone asks "Trust This Computer?" -> Trust -> type the passcode.
+  2. Open Sideloadly. Your iPhone shows at the top.
+  3. Drag DenDevLive.ipa into the Sideloadly window.
+  4. Type YOUR Apple ID (email) in Sideloadly -> Start.
+     The password is typed only into Sideloadly, never anywhere else.
+  5. Wait for "Done".
+  6. On the iPhone: Settings -> General -> VPN & Device Management ->
+     tap your Apple ID -> Trust.
+  7. First time only (iOS 16 and newer): Settings -> Privacy & Security ->
+     Developer Mode -> ON -> Restart -> Turn On.
+  8. Open Den-Dev Live. Allow Microphone and Local Network when asked.
+
+EVERY 7 DAYS (free Apple ID)
+  The app stops opening after 7 days. Do steps 1-5 again (about 2 minutes).
+  Your settings and stream key stay.
+
+PROBLEMS
+  - Sideloadly does not see the iPhone: install Apple Devices, unplug/replug,
+    unlock, tap Trust. Try another cable or USB port.
+  - "Untrusted Developer": do step 6.
+  - App closes at once: do step 7 (Developer Mode).

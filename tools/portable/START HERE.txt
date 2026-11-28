@@ -8,24 +8,36 @@ watermark. Nothing to install for the mirror itself.
 EASIEST: open  "START HERE (guide).html"  (any browser, also on the phone).
 
 
+TWO DOWNLOADS - pick the one for your phone
+  DenDevLive_iPhone.zip   = laptop program + iPhone app installer
+  DenDevLive_Android.zip  = laptop program + Android steps (no app needed)
+  Both have the same laptop program, so either one also mirrors the other
+  phone type.
+
 WHAT IS IN THIS FOLDER
-  1 - SETUP (first time).bat   run once on each new PC: checks it, offers to
-                               install what is missing, makes a Desktop shortcut
-  2 - Start Mirror.bat         starts the mirror (or the Desktop shortcut)
-  START HERE (guide).html      the full illustrated guide
-  app\  python\                the program and its own Python (touches nothing)
-  installers\                  Sideloadly, VB-Cable, the iPhone app (.ipa)
+  1 - LAPTOP\        the Windows program (no install needed)
+     1 - SETUP (first time).bat    run once on each new PC: checks it, offers
+                                   what is missing, makes the Desktop shortcut
+     2 - Start Den-Dev Live.bat    starts the program (or the Desktop shortcut)
+     app\  python\  installers\     the program, its own Python, VB-Cable
+  2 - iPHONE\        (iPhone download) the phone app
+     DenDevLive.ipa                the app file (put on the iPhone with Sideloadly)
+     SideloadlySetup64.exe         Sideloadly (SETUP also offers it)
+     How to install on iPhone.txt
+  2 - ANDROID\       (Android download) nothing to install on the phone
+     How to connect Android.txt    turn on USB debugging, plug in, done
+  START HERE (guide).html          the full illustrated guide
 
 
 FIRST TIME ON A NEW PC (about 5 minutes)
   1. Downloaded from Google Drive? Right-click the ZIP -> Properties ->
      tick "Unblock" -> OK. Then right-click -> Extract All -> C:\DenDevLive
      (not inside a OneDrive / Google Drive sync folder, not inside the zip).
-  2. Double-click  "1 - SETUP (first time).bat" .
+  2. Open "1 - LAPTOP" -> double-click "1 - SETUP (first time).bat" .
      "Windows protected your PC" -> More info -> Run anyway.
      Type Y for what you need:
-       Apple Devices  - iPhone by USB cable + Sideloadly
-       Sideloadly     - to put the app on an iPhone
+       Apple Devices  - iPhone by USB cable + Sideloadly (iPhone download)
+       Sideloadly     - to put the app on an iPhone (iPhone download)
        VB-Audio Cable - stream sound to OBS / TikTok (restart the PC after)
   3. Start with the Desktop shortcut "Den-Dev Live".
      If the Firewall asks about python or adb: Cancel is fine.
@@ -47,7 +59,7 @@ IPHONE
   Free Apple ID: the app stops opening after 7 days. Re-install it:
     1. Stop the broadcast on the iPhone.
     2. Sideloadly + Apple Devices must be installed (SETUP does it).
-    3. Plug in the iPhone, drag installers\DenDevLive.ipa into Sideloadly,
+    3. Plug in the iPhone, drag 2 - iPHONE\DenDevLive.ipa into Sideloadly,
        type YOUR Apple ID, Start. Type the password yourself in Sideloadly only.
     4. iPhone: Settings > General > VPN & Device Management > trust your Apple ID.
     5. First time only (iOS 16+): Settings > Privacy & Security > Developer Mode

@@ -197,6 +197,12 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Fresh-download test of `dist\DenDevLive_Portable.zip` (internet mark, extract, unblock): setup check all OK, `Den-Dev Live 1.0` starts.
 - Still to test on the real phone: Go Live with the app mic (game volume, voice, teammates), iPhone Wi-Fi, Android, PiP comments, 30-min stability, OBS window re-pick.
 
+## Phase 18b - Two downloads: iPhone and Android (2026-11-28)
+- `dist\DenDevLive_iPhone.zip` (266 MB) = `1 - LAPTOP` (program, SETUP, VB-Cable) + `2 - iPHONE` (DenDevLive.ipa, Sideloadly, How to install on iPhone.txt).
+- `dist\DenDevLive_Android.zip` (122 MB) = `1 - LAPTOP` + `2 - ANDROID` (How to connect Android.txt; no app on the phone: scrcpy-server is pushed over adb each time).
+- Same laptop program in both. SETUP checks Apple Devices + Sideloadly only in the iPhone download and unblocks the whole package. Start file renamed `2 - Start Den-Dev Live.bat`.
+- Tested: both self-tests OK; Android zip extracted fresh -> `Den-Dev Live 1.0` starts.
+
 ## Next
 - Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
 - Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.

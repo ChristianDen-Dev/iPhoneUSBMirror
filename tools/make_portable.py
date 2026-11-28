@@ -27,7 +27,9 @@ RECEIVER = os.path.join(ROOT, "receiver")
 DL = os.path.join(ROOT, "build", "dl")
 DIST = os.path.join(ROOT, "dist")
 NAME = "DenDevLive_Portable"
-OUT = os.path.join(DIST, NAME)
+OUT = os.path.join(DIST, NAME)            # old single package (removed)
+PORTABLE = os.path.join(ROOT, "tools", "portable")
+PACKAGES = ("iPhone", "Android")          # one download per phone type, each with the laptop program
 
 PY_VERSION = "3.14.8"                       # same as the development venv
 PY_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/python-{PY_VERSION}-embed-amd64.zip"
@@ -93,60 +95,86 @@ def portable_python(dest):
                            "-r", os.path.join(RECEIVER, "requirements.txt")])
 
 
-def main():
-    if os.path.isdir(OUT):
-        log(f"removing old {OUT}")
-        shutil.rmtree(OUT)
-    os.makedirs(OUT)
+def zip_folder(src, name):
+    zpath = os.path.join(DIST, name + ".zip")
+    log(f"zipping -> {zpath}")
+    if os.path.exists(zpath):
+        os.remove(zpath)
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for folder, _, files in os.walk(src):
+            if "__pycache__" in folder:
+                continue
+            for f in files:
+                full = os.path.join(folder, f)
+                zf.write(full, os.path.join(name, os.path.relpath(full, src)))
+    log(f"done: {zpath}  ({os.path.getsize(zpath) / 1e6:.0f} MB)")
 
-    # also keep the development copy of the Android tools up to date
-    android_tools(os.path.join(RECEIVER, "vendor", "android"))
 
+def build_laptop(laptop):
+    """The Windows program (same in both packages)."""
+    os.makedirs(laptop)
     log("app files")
-    app = os.path.join(OUT, "app")
+    app = os.path.join(laptop, "app")
     os.makedirs(app)
     for f in APP_FILES:
         shutil.copy2(os.path.join(RECEIVER, f), app)
     shutil.copytree(os.path.join(RECEIVER, "tools"), os.path.join(app, "tools"),
                     ignore=shutil.ignore_patterns("__pycache__"))
     android_tools(os.path.join(app, "vendor", "android"))
-
     log("portable Python")
-    portable_python(os.path.join(OUT, "python"))
-
-    log("installers")
-    inst = os.path.join(OUT, "installers")
+    portable_python(os.path.join(laptop, "python"))
+    inst = os.path.join(laptop, "installers")
     os.makedirs(inst)
     shutil.copy2(os.path.join(ROOT, "build", "vbcable", "VBCABLE_Driver_Pack46.zip"), inst)
-    shutil.copy2(os.path.join(ROOT, "build", "DenDevLive.ipa"), inst)
-    shutil.copy2(download(SIDELOADLY_URL, "SideloadlySetup64.exe"), inst)
-
-    log("start files + guide")
-    for name in ("1 - SETUP (first time).bat", "2 - Start Mirror.bat", "START HERE.txt", "START HERE (guide).html"):
-        shutil.copy2(os.path.join(ROOT, "tools", "portable", name), OUT)
-    shutil.copy2(os.path.join(ROOT, "LICENSE"), os.path.join(OUT, "LICENSE.txt"))
-
+    for name in ("1 - SETUP (first time).bat", "2 - Start Den-Dev Live.bat"):
+        shutil.copy2(os.path.join(PORTABLE, name), laptop)
     log("self-test: import everything with the portable Python")
-    subprocess.check_call([os.path.join(OUT, "python", "python.exe"), "-c",
+    subprocess.check_call([os.path.join(laptop, "python", "python.exe"), "-c",
                            "import core, android, audio_player, recorder, ui, winutil, mirror, pygame, av, "
                            "sounddevice, numpy, pymobiledevice3; print('[portable] self-test OK', android.available())"],
                           cwd=app)
-    log("self-test: setup checker (report only)")
-    subprocess.call([os.path.join(OUT, "python", "python.exe"), os.path.join(app, "setup_check.py"), "--check"], cwd=OUT)
 
-    zpath = os.path.join(DIST, NAME + ".zip")
-    log(f"zipping -> {zpath}")
-    if os.path.exists(zpath):
-        os.remove(zpath)
-    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for folder, _, files in os.walk(OUT):
-            if "__pycache__" in folder:
-                continue
-            for f in files:
-                full = os.path.join(folder, f)
-                zf.write(full, os.path.join(NAME, os.path.relpath(full, OUT)))
-    size = os.path.getsize(zpath) / 1e6
-    log(f"done: {zpath}  ({size:.0f} MB)")
+
+def main():
+    # also keep the development copy of the Android tools up to date
+    android_tools(os.path.join(RECEIVER, "vendor", "android"))
+    for old in (OUT, os.path.join(DIST, NAME + ".zip")):          # old single package
+        if os.path.isdir(old):
+            shutil.rmtree(old)
+        elif os.path.isfile(old):
+            os.remove(old)
+
+    staging = os.path.join(DIST, "_laptop")
+    if os.path.isdir(staging):
+        shutil.rmtree(staging)
+    build_laptop(staging)
+
+    for phone in PACKAGES:
+        name = f"DenDevLive_{phone}"
+        out = os.path.join(DIST, name)
+        log(f"--- package {name}")
+        if os.path.isdir(out):
+            shutil.rmtree(out)
+        os.makedirs(out)
+        shutil.copytree(staging, os.path.join(out, "1 - LAPTOP"))
+        ph = os.path.join(out, f"2 - {phone.upper() if phone == 'Android' else 'iPHONE'}")
+        os.makedirs(ph)
+        if phone == "iPhone":
+            # the app file + the program that puts it on the phone
+            shutil.copy2(os.path.join(ROOT, "build", "DenDevLive.ipa"), ph)
+            shutil.copy2(download(SIDELOADLY_URL, "SideloadlySetup64.exe"), ph)
+            shutil.copy2(os.path.join(PORTABLE, "How to install on iPhone.txt"), ph)
+        else:
+            shutil.copy2(os.path.join(PORTABLE, "How to connect Android.txt"), ph)
+        for n in ("START HERE.txt", "START HERE (guide).html"):
+            shutil.copy2(os.path.join(PORTABLE, n), out)
+        shutil.copy2(os.path.join(ROOT, "LICENSE"), os.path.join(out, "LICENSE.txt"))
+        log("self-test: setup checker (report only)")
+        laptop = os.path.join(out, "1 - LAPTOP")
+        subprocess.call([os.path.join(laptop, "python", "python.exe"),
+                         os.path.join(laptop, "app", "setup_check.py"), "--check"], cwd=laptop)
+        zip_folder(out, name)
+    shutil.rmtree(staging)
 
 
 if __name__ == "__main__":

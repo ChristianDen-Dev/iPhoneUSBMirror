@@ -19,10 +19,16 @@ import tempfile
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))          # ...\app
-ROOT = os.path.dirname(HERE)                               # package folder
+ROOT = os.path.dirname(HERE)                               # "1 - LAPTOP" folder
+PACKAGE = os.path.dirname(ROOT)                            # the whole package (LAPTOP / iPHONE / ANDROID)
+IPHONE_DIR = os.path.join(PACKAGE, "2 - iPHONE")
+ANDROID_DIR = os.path.join(PACKAGE, "2 - ANDROID")
+# which download is this? (development copy: neither folder -> check everything)
+FOR_IPHONE = os.path.isdir(IPHONE_DIR) or not os.path.isdir(ANDROID_DIR)
+FOR_ANDROID = os.path.isdir(ANDROID_DIR) or not os.path.isdir(IPHONE_DIR)
 INSTALLERS = os.path.join(ROOT, "installers")
 PYTHON = os.path.join(ROOT, "python", "python.exe")
-START_BAT = os.path.join(ROOT, "2 - Start Mirror.bat")
+START_BAT = os.path.join(ROOT, "2 - Start Den-Dev Live.bat")
 ICON = os.path.join(HERE, "icon.ico")
 
 APPLE_DEVICES_STORE = "ms-windows-store://pdp/?productid=9NP83LWLPZ9K"   # Apple Devices (Microsoft Store)
@@ -234,7 +240,7 @@ def check_sideloadly():
         return True
     warn("Sideloadly is not installed. Needed only to INSTALL / RENEW the app on an iPhone.")
     if ask("Install Sideloadly now?"):
-        exe = os.path.join(INSTALLERS, "SideloadlySetup64.exe")
+        exe = os.path.join(IPHONE_DIR, "SideloadlySetup64.exe")
         print("         -> Click YES on the Windows question and follow the installer.")
         powershell(f"Start-Process -FilePath '{exe}' -Wait")
         if sideloadly_installed():
@@ -278,8 +284,9 @@ def main():
         check_decoder()
     print()
     print(f"{BOLD}  Optional parts (only for some uses){END}")
-    results["apple"] = check_apple()
-    results["sideloadly"] = check_sideloadly()
+    if FOR_IPHONE:                                  # iPhone only
+        results["apple"] = check_apple()
+        results["sideloadly"] = check_sideloadly()
     results["vbcable"] = check_vbcable()
     print()
     if results["files"] and not CHECK_ONLY:
@@ -289,11 +296,13 @@ def main():
     print(f"{BOLD}  Summary{END}")
     must = results["windows"] and results["folder"] and results["files"]
     if must:
-        ok("This PC can run the mirror.  Start it with  '2 - Start Mirror.bat'  (or the Desktop shortcut).")
+        ok("This PC can run the mirror.  Start it with  '2 - Start Den-Dev Live.bat'  (or the Desktop shortcut).")
     else:
         bad("Fix the red [X] item(s) above, then run SETUP again.")
-    print("         Android: nothing else to install (turn on USB debugging on the phone).")
-    print("         iPhone : install the app with Sideloadly - see 'START HERE (guide).html'.")
+    if FOR_ANDROID:
+        print("         Android: nothing else to install (turn on USB debugging on the phone - see '2 - ANDROID').")
+    if FOR_IPHONE:
+        print("         iPhone : install '2 - iPHONE\\DenDevLive.ipa' with Sideloadly - see 'START HERE (guide).html'.")
     print()
     return 0 if must else 1
 

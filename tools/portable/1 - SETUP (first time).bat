@@ -5,5 +5,5 @@ rem    from Google Drive (it can block the program), 2) checks the PC.
 title Den-Dev Live - first-time setup
 cd /d "%~dp0"
 echo Preparing files (removing the internet-download block)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath '%~dp0.' -Recurse -File | Unblock-File" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath '%~dp0..' -Recurse -File | Unblock-File" >nul 2>&1
 "%~dp0python\python.exe" -u "%~dp0app\setup_check.py"

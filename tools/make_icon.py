@@ -70,6 +70,11 @@ def main():
                    "info": {"author": "xcode", "version": 1}}, f, indent=2)
     with open(os.path.join(ROOT, "ios", "App", "Assets.xcassets", "Contents.json"), "w") as f:
         json.dump({"info": {"author": "xcode", "version": 1}}, f, indent=2)
+    # Android launcher icon (same logo, rounded), one size per screen density
+    for folder, px in (("mdpi", 48), ("hdpi", 72), ("xhdpi", 96), ("xxhdpi", 144), ("xxxhdpi", 192)):
+        d = os.path.join(ROOT, "android", "app", "src", "main", "res", f"mipmap-{folder}")
+        os.makedirs(d, exist_ok=True)
+        pygame.image.save(draw(px), os.path.join(d, "ic_launcher.png"))
     print("icon ->", path)
 
 

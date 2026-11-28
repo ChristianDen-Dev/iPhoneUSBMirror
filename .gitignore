@@ -41,3 +41,13 @@ receiver/settings.json
 # ---- Android tools (downloaded by tools/get_android_tools.py / make_portable.py) ----
 receiver/vendor/
 dist/
+
+# ---- Android (built in the cloud) ----
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.p12
+*.jks
+*.keystore

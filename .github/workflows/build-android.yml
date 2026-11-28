@@ -1,0 +1,63 @@
+# Builds DenDevLive.apk (Android app) in the cloud. No Android Studio needed.
+# Signing: if the secrets DDL_KEYSTORE_B64 + DDL_KEYSTORE_PASSWORD exist, every
+# build uses that same key (updates install over the old app). Without them a
+# temporary key is used (uninstall the old app before installing a new one).
+name: Build Android (.apk)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/build-android.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Gradle 9.7.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.7.1"
+
+      - name: Signing key (from secrets, if set)
+        env:
+          KS_B64: ${{ secrets.DDL_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.DDL_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/dendevlive.p12"
+            echo "DDL_KEYSTORE=$RUNNER_TEMP/dendevlive.p12" >> "$GITHUB_ENV"
+            echo "DDL_KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+            echo "Using the Den-Dev Live signing key."
+          else
+            echo "No signing secrets: using a temporary key."
+          fi
+
+      - name: Build
+        working-directory: android
+        run: gradle --no-daemon assembleRelease
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/*.apk out/DenDevLive.apk
+          ls -la out
+
+      - name: Upload .apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DenDevLive-apk
+          path: out/DenDevLive.apk
+          if-no-files-found: error

@@ -93,7 +93,7 @@ def check_folder():
         return False
     for sync in ("onedrive", "google drive", "googledrive", "dropbox", "icloud"):
         if sync in p:
-            warn(f"The folder is inside a sync folder ({sync}). Better: move it to C:\\iPhoneUSBMirror.")
+            warn(f"The folder is inside a sync folder ({sync}). Better: move it to C:\\DenDevLive.")
             return True
     ok(f"Folder: {ROOT}")
     return True

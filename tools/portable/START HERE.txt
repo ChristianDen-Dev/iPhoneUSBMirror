@@ -19,7 +19,7 @@ WHAT IS IN THIS FOLDER
 
 FIRST TIME ON A NEW PC (about 5 minutes)
   1. Downloaded from Google Drive? Right-click the ZIP -> Properties ->
-     tick "Unblock" -> OK. Then right-click -> Extract All -> C:\iPhoneUSBMirror
+     tick "Unblock" -> OK. Then right-click -> Extract All -> C:\DenDevLive
      (not inside a OneDrive / Google Drive sync folder, not inside the zip).
   2. Double-click  "1 - SETUP (first time).bat" .
      "Windows protected your PC" -> More info -> Run anyway.
@@ -47,7 +47,7 @@ IPHONE
   Free Apple ID: the app stops opening after 7 days. Re-install it:
     1. Stop the broadcast on the iPhone.
     2. Sideloadly + Apple Devices must be installed (SETUP does it).
-    3. Plug in the iPhone, drag installers\iPhoneUSBMirror.ipa into Sideloadly,
+    3. Plug in the iPhone, drag installers\DenDevLive.ipa into Sideloadly,
        type YOUR Apple ID, Start. Type the password yourself in Sideloadly only.
     4. iPhone: Settings > General > VPN & Device Management > trust your Apple ID.
     5. First time only (iOS 16+): Settings > Privacy & Security > Developer Mode
@@ -55,9 +55,20 @@ IPHONE
 
 
 GO LIVE FROM THE IPHONE (no PC)
-  Den-Dev Live -> Go Live -> platform -> paste your stream key -> GO LIVE.
-  Arrow tab on the right edge = comments (tap again to hide).
-  "Screen hidden" = viewers see Be right back. Test with privacy "Only me".
+  1. Den-Dev Live -> Go Live -> platform -> paste your stream key -> quality.
+     (Facebook: facebook.com/live/producer -> Streaming software ->
+      "Use a persistent stream key". YouTube: Studio -> Go live -> Stream.)
+  2. Sound card: "Den-Dev Live mic (game stays loud)" ON.
+  3. GO LIVE -> in the Start Broadcast sheet keep Microphone OFF (grey)
+     -> Start Broadcast -> open your game.
+     The app records your voice itself, so iOS does NOT turn the game down.
+     Teammates' voices (game speaker) are part of the game sound.
+  4. While live: Mic on/off, Screen shown/hidden ("Be right back"),
+     arrow tab = see-through comments (drag it to any side; tap the game = hide).
+  Studio (Go Live -> Studio): landscape/portrait, fit/blur/fill, your logo,
+  banner text, LIVE badge, "Be right back" text. Changes show on the live in ~1 s.
+  First test with privacy "Only me". The stream key is a SECRET: never share it.
+  Earphones give the cleanest voice (on the speaker the mic also hears the game).
 
 
 ANDROID (no app to install on the phone)

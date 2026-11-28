@@ -118,12 +118,13 @@ def main():
     inst = os.path.join(OUT, "installers")
     os.makedirs(inst)
     shutil.copy2(os.path.join(ROOT, "build", "vbcable", "VBCABLE_Driver_Pack46.zip"), inst)
-    shutil.copy2(os.path.join(ROOT, "build", "iPhoneUSBMirror.ipa"), inst)
+    shutil.copy2(os.path.join(ROOT, "build", "DenDevLive.ipa"), inst)
     shutil.copy2(download(SIDELOADLY_URL, "SideloadlySetup64.exe"), inst)
 
     log("start files + guide")
     for name in ("1 - SETUP (first time).bat", "2 - Start Mirror.bat", "START HERE.txt", "START HERE (guide).html"):
         shutil.copy2(os.path.join(ROOT, "tools", "portable", name), OUT)
+    shutil.copy2(os.path.join(ROOT, "LICENSE"), os.path.join(OUT, "LICENSE.txt"))
 
     log("self-test: import everything with the portable Python")
     subprocess.check_call([os.path.join(OUT, "python", "python.exe"), "-c",

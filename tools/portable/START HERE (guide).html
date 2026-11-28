@@ -71,7 +71,7 @@
       Google says <i>"can't scan this file for viruses"</i> because it is big &rarr; click <span class="btn">Download anyway</span>.</li>
     <li>In the Downloads folder: <b>right-click the zip &rarr; Properties &rarr; tick <span class="btn">Unblock</span> &rarr; OK</b>.
       (If there is no Unblock box, that is fine.) This stops Windows from blocking the program later.</li>
-    <li>Right-click the zip &rarr; <span class="btn">Extract All</span> &rarr; choose a simple place, for example <span class="path">C:\iPhoneUSBMirror</span>.<br>
+    <li>Right-click the zip &rarr; <span class="btn">Extract All</span> &rarr; choose a simple place, for example <span class="path">C:\DenDevLive</span>.<br>
       Do not run it from inside the zip, and not from a OneDrive / Google Drive sync folder.</li>
   </ol>
   <div class="note good">Needs Windows 10 or 11, 64-bit. No Python or other install is needed for the mirror itself.
@@ -103,7 +103,7 @@
     (and renew every 7 days with a free Apple ID).</p>
   <ol>
     <li>Plug the iPhone into the PC with the cable. Unlock it and tap <span class="btn">Trust</span> &rarr; type the iPhone passcode.</li>
-    <li>Open <b>Sideloadly</b>. Drag <span class="path">installers\iPhoneUSBMirror.ipa</span> into it.</li>
+    <li>Open <b>Sideloadly</b>. Drag <span class="path">installers\DenDevLive.ipa</span> into it.</li>
     <li>Type <b>your own</b> Apple ID e-mail and click <span class="btn">Start</span>. Type your password (and the 6-digit code) <b>only in Sideloadly</b>.
       Never give your Apple ID password to anyone. Wait for <i>"Done"</i>.</li>
     <li><b>Trust the app</b> on the iPhone: Settings &rarr; General &rarr; <b>VPN &amp; Device Management</b> &rarr; tap your Apple ID &rarr;
@@ -155,9 +155,12 @@
     <li>Get your <b>stream key</b>: Facebook &rarr; <span class="path">facebook.com/live/producer</span> &rarr; Streaming software &rarr;
       "Use a persistent stream key" &rarr; copy. YouTube &rarr; Studio &rarr; Go live &rarr; Stream &rarr; copy.</li>
     <li>Den-Dev Live &rarr; <b>Go Live</b> &rarr; choose the platform &rarr; paste the key &rarr; pick quality.</li>
-    <li>Tap <b>GO LIVE</b> &rarr; Microphone ON if you want to talk &rarr; Start Broadcast &rarr; open your game.</li>
-    <li>Comments: tap the <b>arrow tab</b> on the right edge (tap again to hide). Sign in there once.
+    <li>Sound card: <b>Den-Dev Live mic (game stays loud)</b> = ON.</li>
+    <li>Tap <b>GO LIVE</b> &rarr; keep <b>Microphone OFF</b> (grey) in the Start Broadcast sheet &rarr; Start Broadcast &rarr; open your game.
+      The app records your voice itself, so iOS does not turn the game sound down. Teammates' voices are part of the game sound.</li>
+    <li>Comments: tap the <b>arrow tab</b> (drag it to any side) &rarr; see-through comments float over the game; tap the game to hide them. Sign in once in <b>Full chat</b>.
       <b>Screen hidden</b> = viewers see "Be right back"; <b>Mic off</b> mutes you.</li>
+    <li><b>Studio</b> (Go Live &rarr; Studio): landscape / portrait, fit / blur / fill, your logo, banner text, LIVE badge. Changes show on the live within 1 second.</li>
   </ol>
   <div class="note">First test with Facebook privacy <b>Only me</b>. The stream key is a secret &mdash; never share it or put it in a screenshot.</div>
 </section>
@@ -173,6 +176,8 @@
     <tr><td>"Waiting for a phone"</td><td>Start the broadcast on the iPhone / tap Allow on Android. Wi-Fi: press <kbd>W</kbd>, same Wi-Fi, Local Network = Allow.</td></tr>
     <tr><td>Wi-Fi stutters</td><td>Use 5 GHz Wi-Fi or the iPhone Hotspot, or the USB cable.</td></tr>
     <tr><td>No sound in OBS</td><td>Install VB-Cable (SETUP, then restart). Desktop Audio = CABLE Input. Press <kbd>A</kbd> in the mirror.</td></tr>
+    <tr><td>Go Live: game gets quiet when I talk</td><td>Turn ON "Den-Dev Live mic" and keep Microphone OFF in the Start Broadcast sheet. (Talking in the game's own voice chat can still make the game a bit quieter &mdash; that is the game.)</td></tr>
+    <tr><td>Go Live: "trouble playing" / stops</td><td>Check the internet (Wi-Fi or mobile data), the stream key and that the live is set up on the website. The app reconnects by itself.</td></tr>
     <tr><td>Anything else</td><td>Run <span class="path">1 - SETUP (first time).bat</span> again &mdash; it shows what is missing.</td></tr>
   </table>
 </section>

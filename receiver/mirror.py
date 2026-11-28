@@ -37,6 +37,7 @@ from recorder import Recorder
 from ui import (ACCENT, AMBER, BG, DIM, FAINT, GREEN, HEAT_COLORS, HOVER, LINE, ON, PANEL,
                 PANEL_2, PRESSED, RED, TEXT)
 
+VERSION = "1.0"
 WINDOW_TITLE = "Den-Dev Live"
 APP_FOLDER = "iPhone USB Mirror"
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -1203,8 +1204,10 @@ class App:
 
 def main():
     parser = argparse.ArgumentParser(description="Den-Dev Live receiver (iPhone + Android, USB + Wi-Fi)")
+    parser.add_argument("--version", action="version", version=f"Den-Dev Live {VERSION}")
     parser.add_argument("--tcp", help="debug: connect to HOST:PORT instead of usbmux")
     args = parser.parse_args()
+    print(f"Den-Dev Live {VERSION}", flush=True)
     tcp_address = None
     if args.tcp:
         host, port = args.tcp.rsplit(":", 1)

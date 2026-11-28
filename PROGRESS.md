@@ -189,6 +189,14 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Limits: the Mobile Legends in-game mic is controlled by ML. When you talk in ML, ML itself switches to call mode (iOS may then lower the game a little); the auto level keeps the stream loud. With the phone speaker the app mic also hears the game: earphones give the cleanest sound.
 - CI 46085481285 OK -> build\DenDevLive.ipa (mic permission asked when the app opens). Package rebuilt.
 
+## Phase 18 - Final version 1.0 (2026-11-28)
+- Version **1.0**: iPhone app (MARKETING_VERSION 1.0) and PC software (`mirror.py --version`, printed at start).
+- README.md (what it does, install, layout, build, privacy) and LICENSE = GPL-3.0 (the PC side uses pymobiledevice3, GPL-3.0); LICENSE.txt is also in the package.
+- Guide + START HERE.txt: Go Live with the Den-Dev Live mic (Microphone OFF in the broadcast sheet), Studio, floating comments, two new Go Live problems. Package folder suggestion C:\DenDevLive, the iPhone file is `installers\DenDevLive.ipa`.
+- Secret scan of all files and the whole git history: no Apple ID, password, stream key or token. Commits use the GitHub noreply email.
+- Fresh-download test of `dist\DenDevLive_Portable.zip` (internet mark, extract, unblock): setup check all OK, `Den-Dev Live 1.0` starts.
+- Still to test on the real phone: Go Live with the app mic (game volume, voice, teammates), iPhone Wi-Fi, Android, PiP comments, 30-min stability, OBS window re-pick.
+
 ## Next
 - Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
 - Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.

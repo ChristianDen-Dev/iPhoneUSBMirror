@@ -203,6 +203,19 @@ Code is now split: `core.py` (USB/decode engine), `mirror.py` (window), `ui.py` 
 - Same laptop program in both. SETUP checks Apple Devices + Sideloadly only in the iPhone download and unblocks the whole package. Start file renamed `2 - Start Den-Dev Live.bat`.
 - Tested: both self-tests OK; Android zip extracted fresh -> `Den-Dev Live 1.0` starts.
 
+## Phase 19 - Android app (2026-11-28)
+- `android/` = Den-Dev Live for Android, same app as the iPhone one (Kotlin + Jetpack Compose, minSdk 29 / Android 10, target 37):
+  - Home: USB / Wi-Fi / Go Live cards (same colors and text as iOS).
+  - USB: steps only (the laptop uses adb + scrcpy-server, no app needed); button opens Developer options.
+  - Wi-Fi: `MirrorService` = MediaProjection -> H.264 MediaCodec (12 Mbps, 60 fps, long side 1920) + game sound (AudioPlaybackCapture) + mic (AUDIO_MIC), same wire protocol as the iPhone (ports 2345/2346, docs/PROTOCOL.md). Rotation = new encoder size, same capture. The laptop shows "Android app".
+  - Go Live: `LiveService` = RootEncoder 2.8.2 (GenericStream, ScreenSource, MixAudioSource = game + mic mixed on the phone, no ducking), RTMP/RTMPS, 30 retries, adaptive bitrate, force-render for still screens, notification buttons Mic / Screen / Stop.
+  - Studio: landscape / portrait, fit / fill, logo (Photos), banner (4 colors), LIVE badge + timer, Be right back card (drawn by `StreamLook`, one overlay picture per second).
+  - Comments: shared WebView with the same reader script as iOS; floating bubble (drag to any side, snaps), tap = see-through comments + Mic / Screen / Full chat / Stop; tap the game = hide (FLAG_WATCH_OUTSIDE_TOUCH). Comments window lets touches through (alpha <= 0.8).
+  - Stream key: AES-GCM with an Android Keystore key.
+- Cloud build `.github/workflows/build-android.yml` (ubuntu, Java 21, Gradle 9.7.1, AGP 9.3.2, Kotlin 2.4.10). First build OK: run 46119479238 -> build\DenDevLive.apk (29 MB). Not yet tested on a real phone.
+- Signing: temporary (debug) key per build until the user OKs a fixed key in GitHub secrets (DDL_KEYSTORE_B64 / DDL_KEYSTORE_PASSWORD); without it, uninstall the old app before installing a new APK.
+- Android download now has `2 - ANDROID\DenDevLive.apk` (zip 133 MB).
+
 ## Next
 - Real-phone tests: iPhone Wi-Fi (new .ipa), Android USB + Wi-Fi.
 - Phase 8b: OBS / TikTok LIVE Studio capture check, 30-min stability test.

@@ -165,6 +165,12 @@ def main():
             shutil.copy2(download(SIDELOADLY_URL, "SideloadlySetup64.exe"), ph)
             shutil.copy2(os.path.join(PORTABLE, "How to install on iPhone.txt"), ph)
         else:
+            # the Android app (optional for mirroring by cable, needed for Wi-Fi mirror + Go Live)
+            apk = os.path.join(ROOT, "build", "DenDevLive.apk")
+            if os.path.isfile(apk):
+                shutil.copy2(apk, ph)
+            else:
+                log("WARNING: build/DenDevLive.apk missing - Android package has no app")
             shutil.copy2(os.path.join(PORTABLE, "How to connect Android.txt"), ph)
         for n in ("START HERE.txt", "START HERE (guide).html"):
             shutil.copy2(os.path.join(PORTABLE, n), out)

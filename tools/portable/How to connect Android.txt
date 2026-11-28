@@ -1,34 +1,55 @@
 Den-Dev Live - Android
 ======================
-NOTHING TO INSTALL ON THE PHONE.
-The laptop program sends a small helper to the phone through the cable every
-time it connects (the same way the well-known open-source tool "scrcpy" works).
-When you unplug, the helper is gone. No app, no APK.
+WHAT IS IN THIS FOLDER
+  DenDevLive.apk     the Den-Dev Live app for Android (same app as on the iPhone)
 
-ONE TIME ON THE PHONE (turn on USB debugging)
+WHAT YOU NEED IT FOR
+  USB mirror to the laptop  -> no app needed (USB debugging, see below)
+  Wi-Fi mirror to the laptop -> the app
+  Go Live from the phone    -> the app (Facebook / YouTube / TikTok / RTMP,
+                               Studio look, floating comments over the game)
+
+INSTALL THE APP (about 1 minute)
+  1. Copy DenDevLive.apk to the phone (USB cable, Google Drive, Messenger...)
+     or download it on the phone from the Google Drive link.
+  2. Tap the file -> Android asks "Install unknown apps?" ->
+     Settings -> allow for this app (Files / Chrome / Drive) -> back -> Install.
+  3. Play Protect may say "unknown app": tap "More details" -> "Install anyway".
+     (The app is not on the Play Store; it is safe and open source.)
+  4. Open Den-Dev Live. Allow Microphone and Notifications when asked.
+     For floating comments: tap "Allow" (Display over other apps).
+  New version later: install the new APK the same way, over the old one.
+
+USB MIRROR - ONE TIME ON THE PHONE (turn on USB debugging)
   1. Settings -> About phone -> tap "Build number" 7 times.
      (Samsung: Settings -> About phone -> Software information -> Build number.)
      It says "You are now a developer".
   2. Settings -> Developer options (or System -> Developer options)
      -> USB debugging -> ON.
 
-CONNECT BY CABLE
+USB MIRROR - EVERY TIME
   1. Start Den-Dev Live on the laptop (Desktop shortcut).
   2. Plug in the phone. On the phone: "Allow USB debugging?"
      -> tick "Always allow from this computer" -> Allow.
   3. The phone screen appears on the laptop. The mouse works as your finger.
      Backspace = Back, Home = Home, End = Recent apps.
 
-CONNECT BY WI-FI (after the cable works once)
-  Right-click the Den-Dev Live window -> "Android: switch to Wi-Fi" ->
-  unplug. Do it again after each phone restart.
+WI-FI MIRROR (with the app)
+  Phone and laptop on the same Wi-Fi. App -> Wi-Fi -> Start mirroring ->
+  Start now. The laptop finds the phone by itself (press W to search now).
+
+GO LIVE (with the app)
+  App -> Go Live -> platform -> paste the stream key -> GO LIVE -> Start now.
+  Tap the floating bubble for comments + Mic / Screen / Stop buttons;
+  tap the game to hide them. First test with privacy "Only me".
 
 SOUND
-  Needs Android 11 or newer. While mirroring, the phone speaker is silent;
-  right-click -> "Android: keep game sound on the phone too" (Android 13+).
+  Game sound needs Android 10 or newer (USB mirror: Android 11+), and the game
+  must allow sound recording. Game voice chat (teammates) cannot be recorded
+  by any app on Android.
 
 PROBLEMS
-  - Phone not found: try another cable / USB port, set the USB mode to
+  - Phone not found by USB: try another cable / USB port, set the USB mode to
     "File transfer", or install the phone maker's USB driver.
   - No "Allow USB debugging" message: unplug, turn USB debugging off and on, plug in.
-  - Go Live directly from the phone (without the laptop) is iPhone-only for now.
+  - "App not installed": uninstall the old Den-Dev Live first, then install again.

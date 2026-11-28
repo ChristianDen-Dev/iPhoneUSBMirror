@@ -389,7 +389,7 @@ class AudioChannel(threading.Thread):
             print("[audio] sound-only channel disabled (MIRROR_AUDIO_CHANNEL=0)", flush=True)
             return
         while self.s.running:
-            if self.s.state != ST_CONNECTED or self.s.device_kind != "iPhone":
+            if self.s.state != ST_CONNECTED or self.s.device_kind not in ("iPhone", "Android app"):
                 time.sleep(0.3)
                 continue
             try:
@@ -884,7 +884,10 @@ class Receiver(threading.Thread):
             elif ptype == T_INFO:
                 text = bytes(payload).decode("utf-8", "replace")
                 self.s.info = text
-                print(f"[iphone] {time.strftime('%H:%M:%S')} {text}", flush=True)
+                if text.startswith("Android "):           # the Den-Dev Live Android app (Wi-Fi mirror)
+                    self.s.device_kind = "Android app"      # same protocol as the iPhone (not adb)
+                    self.s.device_name = text.split(" (", 1)[0][len("Android "):] or "Android"
+                print(f"[iphone]{time.strftime('%H:%M:%S')} {text}", flush=True)
             # T_HEARTBEAT: nothing to do (it just keeps the timeout from firing)
             report = self.sync.report()
             if report:

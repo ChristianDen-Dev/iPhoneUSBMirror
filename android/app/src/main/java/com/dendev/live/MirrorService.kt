@@ -1,11 +1,17 @@
-// Mirror this Android phone to the laptop over Wi-Fi, exactly like the iPhone
-// app: the phone listens on port 2345 (picture + sound) and 2346 (sound only),
-// the laptop program finds it by itself (same wire format, docs/PROTOCOL.md).
+// Mirror this Android phone to the laptop, exactly like the iPhone app's
+// broadcast: the phone listens on port 2345 (picture + sound) and 2346 (sound
+// only) with the same wire format (docs/PROTOCOL.md).
+//   USB  : the laptop reaches the ports through "adb forward" (like usbmux on
+//          the iPhone). Connections then come from 127.0.0.1 on the phone.
+//   Wi-Fi: the laptop finds the phone on the network by itself.
+// The capture keeps running when the USB link blinks; the laptop simply
+// connects again (newest laptop connection wins, like the iPhone).
 //
 // Picture: screen -> H.264 hardware encoder (Annex-B), VIDEO_CONFIG before each keyframe.
+//          USB 20 Mbps; Wi-Fi starts at 8 Mbps and adapts 12 -> 3 Mbps (same as iPhone).
 // Sound:   game sound (AudioPlaybackCapture) -> AUDIO_PCM, your mic -> AUDIO_MIC,
 //          48 kHz 16-bit stereo. The laptop mixes the mic into the stream only.
-// USB on Android needs no app (the laptop uses adb + scrcpy-server).
+// Every 5 s an INFO text (same fields as the iPhone: heat, sound, mic, link, bitrate).
 
 package com.dendev.live
 
@@ -31,7 +37,9 @@ import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.PowerManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -48,12 +56,14 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 data class MirrorStatus(
     val running: Boolean = false,
     val connected: Boolean = false,       // the laptop is receiving
+    val usb: Boolean = false,             // laptop connected through the USB cable (adb)
     val width: Int = 0,
     val height: Int = 0,
     val message: String = "",
@@ -84,6 +94,13 @@ class MirrorService : Service() {
         const val T_INFO = 6
         const val T_AUDIO_MIC = 7
 
+        // same numbers as the iPhone (SampleHandler / MirrorServer)
+        const val USB_BITRATE = 20_000_000
+        val WIFI_LEVELS = intArrayOf(12_000_000, 8_000_000, 5_000_000, 3_000_000)
+        const val USB_BACKLOG = 1_000_000       // bytes waiting before video frames are dropped
+        const val WIFI_BACKLOG = 300_000
+        const val AUDIO_BACKLOG = 2_000_000
+
         fun packet(type: Int, flags: Int, tsUs: Long, payload: ByteArray, off: Int = 0, len: Int = payload.size): ByteArray {
             val b = ByteBuffer.allocate(14 + len).order(ByteOrder.BIG_ENDIAN)
             b.put(type.toByte()); b.put(flags.toByte()); b.putLong(tsUs); b.putInt(len)
@@ -95,6 +112,7 @@ class MirrorService : Service() {
 
     /** One laptop connection with its own sender thread (never blocks the encoder). */
     private inner class Client(val socket: Socket, val name: String) {
+        val usb = socket.inetAddress?.isLoopbackAddress == true   // adb forward = USB cable
         val queue = LinkedBlockingQueue<ByteArray>()
         val queued = AtomicLong(0)
         @Volatile var alive = true
@@ -140,6 +158,21 @@ class MirrorService : Service() {
     private var height = 0
     private var dpi = 320
     private var overlay: Overlay? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    // bitrate + statistics (like the iPhone)
+    @Volatile private var bitrate = USB_BITRATE
+    @Volatile private var wifiLevel = 1
+    private var cleanSeconds = 0
+    private val dropped = AtomicInteger(0)          // this second
+    private val droppedTotal = AtomicInteger(0)     // since the last INFO
+    private val audioPieces = AtomicInteger(0)
+    private val micPieces = AtomicInteger(0)
+    @Volatile private var lastAudioAt = 0L
+    @Volatile private var audioMaxGapMs = 0L
+    @Volatile private var screenW = 0                // phone screen before scaling
+    @Volatile private var screenH = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -186,11 +219,17 @@ class MirrorService : Service() {
         listen(AUDIO_PORT) { s -> audioClient?.close(); audioClient = Client(s, "audio") }
         startGameSound(mp)
         startMic()
-        thread(name = "heartbeat", isDaemon = true) {
+        holdLocks()
+        thread(name = "tick", isDaemon = true) {
+            var n = 0
             while (running) {
+                Thread.sleep(1000)
                 val hb = packet(T_HEARTBEAT, 0, nowUs(), ByteArray(0))
                 mainClient?.send(hb); audioClient?.send(hb)
-                Thread.sleep(1000)
+                if (mainClient?.alive == true) {
+                    adaptBitrate()
+                    if (n++ % 5 == 0) sendInfo()
+                }
             }
         }
         if (AndroidSettings.canDrawOverlays(this)) overlay = Overlay(this, mirror = true).also { it.show() }
@@ -201,6 +240,8 @@ class MirrorService : Service() {
         if (!running && projection == null) { stopSelf(); return }
         running = false
         overlay?.hide(); overlay = null
+        runCatching { wakeLock?.release() }; wakeLock = null
+        runCatching { wifiLock?.release() }; wifiLock = null
         runCatching { getSystemService(DisplayManager::class.java).unregisterDisplayListener(rotationWatch) }
         servers.forEach { runCatching { it.close() } }
         servers.clear()
@@ -238,20 +279,99 @@ class MirrorService : Service() {
     }
 
     private fun onMainClient(s: Socket) {
-        mainClient?.close()                       // one laptop at a time
+        mainClient?.close()                       // one laptop at a time, newest wins
         val c = Client(s, "main")
         mainClient = c
         c.send(packet(T_ORIENTATION, 0, nowUs(), byteArrayOf(1)))     // already upright
-        c.send(packet(T_INFO, 0, nowUs(), "Android ${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})".toByteArray()))
+        c.send(packet(T_INFO, 0, nowUs(), identity().toByteArray()))
+        wifiLevel = 1                              // Wi-Fi starts at 8 Mbps, climbs if clean
+        cleanSeconds = 0
+        applyBitrate()
         requestKey()
         main.post { refreshStatus() }
     }
 
+    private fun identity() = "Android ${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})"
+
     private fun refreshStatus() {
-        val connected = mainClient?.alive == true
-        Mirror.status.value = MirrorStatus(running = running, connected = connected, width = width, height = height)
-        if (running) getSystemService(NotificationManager::class.java)
-            .notify(NOTE_ID, notification(if (connected) "Mirroring to the laptop" else "Waiting for the laptop…"))
+        val c = mainClient
+        val connected = c?.alive == true
+        val usb = connected && c?.usb == true
+        Mirror.status.value = MirrorStatus(running = running, connected = connected, usb = usb, width = width, height = height)
+        if (running) getSystemService(NotificationManager::class.java).notify(NOTE_ID, notification(
+            when { !connected -> "Waiting for the laptop…"; usb -> "Mirroring to the laptop · USB"; else -> "Mirroring to the laptop · Wi-Fi" }))
+    }
+
+    /** Keep the CPU and Wi-Fi awake while mirroring (no sleep-related drops). */
+    @SuppressLint("WakelockTimeout")
+    private fun holdLocks() {
+        runCatching {
+            wakeLock = getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DenDev:mirror").apply { setReferenceCounted(false); acquire() }
+        }
+        runCatching {
+            val wm = applicationContext.getSystemService(WifiManager::class.java)
+            @Suppress("DEPRECATION")
+            val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY else WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wifiLock = wm.createWifiLock(mode, "DenDev:mirror").apply { setReferenceCounted(false); acquire() }
+        }
+    }
+
+    // ---------------- bitrate + INFO (same rules as the iPhone) ----------------
+
+    private fun targetBitrate(): Int {
+        val c = mainClient
+        return if (c == null || c.usb) USB_BITRATE else WIFI_LEVELS[wifiLevel]
+    }
+
+    private fun applyBitrate() {
+        val b = targetBitrate()
+        if (b == bitrate) return
+        bitrate = b
+        encoder?.let { e -> runCatching { e.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, b) }) } }
+        Log.i(TAG, "bitrate -> ${b / 1_000_000} Mbps")
+    }
+
+    /** Once per second: frames dropped because the network is behind -> step down; clean -> step up. */
+    private fun adaptBitrate() {
+        val d = dropped.getAndSet(0)
+        val c = mainClient ?: return
+        if (!c.usb) {
+            if (d >= 3) {
+                cleanSeconds = 0
+                if (wifiLevel < WIFI_LEVELS.size - 1) wifiLevel++
+            } else {
+                cleanSeconds++
+                if (cleanSeconds >= 6 && wifiLevel > 0) { wifiLevel--; cleanSeconds = 0 }
+            }
+        }
+        applyBitrate()
+    }
+
+    private fun thermal(): String {
+        if (Build.VERSION.SDK_INT < 29) return "nominal"
+        return when (getSystemService(PowerManager::class.java).currentThermalStatus) {
+            PowerManager.THERMAL_STATUS_NONE, PowerManager.THERMAL_STATUS_LIGHT -> "nominal"
+            PowerManager.THERMAL_STATUS_MODERATE -> "fair"
+            PowerManager.THERMAL_STATUS_SEVERE -> "SERIOUS"
+            else -> "CRITICAL"
+        }
+    }
+
+    private fun sendInfo() {
+        val c = mainClient ?: return
+        val rt = Runtime.getRuntime()
+        val memMb = (rt.totalMemory() - rt.freeMemory()) / 1_048_576.0
+        val lowPower = getSystemService(PowerManager::class.java).isPowerSaveMode
+        val pieces = audioPieces.getAndSet(0)
+        val mics = micPieces.getAndSet(0)
+        val gap = audioMaxGapMs; audioMaxGapMs = 0
+        val text = "%s | source %dx%d -> encode %dx%d | orient 1 | mem %.1f MB | thermal %s | lowPower %s".format(
+            identity(), screenW, screenH, width, height, memMb, thermal(), if (lowPower) "on" else "off") +
+            " | audio in %d pieces, max gap %d ms, channel %s | mic %s | link %s | bitrate %d Mbps, dropped %d".format(
+            pieces, gap, if (audioClient?.alive == true) "separate" else "main", if (mics > 0) "on" else "off",
+            if (c.usb) "usb" else "wifi", bitrate / 1_000_000, droppedTotal.getAndSet(0))
+        c.send(packet(T_INFO, 0, nowUs(), text.toByteArray()))
     }
 
     // ---------------- picture ----------------
@@ -263,6 +383,7 @@ class MirrorService : Service() {
         val m = DisplayMetrics()
         @Suppress("DEPRECATION") d.getRealMetrics(m)
         dpi = m.densityDpi
+        screenW = m.widthPixels; screenH = m.heightPixels
         val scale = minOf(1f, 1920f / maxOf(m.widthPixels, m.heightPixels))
         width = ((m.widthPixels * scale).toInt() / 16) * 16
         height = ((m.heightPixels * scale).toInt() / 16) * 16
@@ -271,7 +392,7 @@ class MirrorService : Service() {
     private fun makeEncoder(w: Int, h: Int): MediaCodec {
         val f = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
         f.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-        f.setInteger(MediaFormat.KEY_BIT_RATE, 12_000_000)
+        f.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
         f.setInteger(MediaFormat.KEY_FRAME_RATE, 60)
         f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
         f.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 500_000)   // still screen: repeat the picture
@@ -317,7 +438,10 @@ class MirrorService : Service() {
     private fun sendFrame(frame: ByteArray, key: Boolean, tsUs: Long, w: Int, h: Int) {
         val c = mainClient ?: return
         if (!c.alive) return
-        if (c.queued.get() > 1_000_000 && !key) { requestKey(); return }   // laptop busy: skip until the next keyframe
+        if (c.queued.get() > (if (c.usb) USB_BACKLOG else WIFI_BACKLOG) && !key) {   // laptop/network behind:
+            dropped.incrementAndGet(); droppedTotal.incrementAndGet()                // drop, restart at a keyframe
+            requestKey(); return
+        }
         if (needKey && !key) return
         if (key) {
             needKey = false
@@ -378,8 +502,12 @@ class MirrorService : Service() {
                 while (running) {
                     val n = rec.read(buf, 0, buf.size)
                     if (n <= 0) continue
+                    val now = System.nanoTime() / 1_000_000
+                    if (lastAudioAt > 0) audioMaxGapMs = maxOf(audioMaxGapMs, now - lastAudioAt)
+                    lastAudioAt = now
+                    audioPieces.incrementAndGet()
                     val ts = nowUs() - n / 4 * 1_000_000L / 48_000
-                    audioTarget()?.let { c -> if (c.queued.get() < 2_000_000) c.send(packet(T_AUDIO_PCM, 0, ts, buf, 0, n)) }
+                    audioTarget()?.let { c -> if (c.queued.get() < AUDIO_BACKLOG) c.send(packet(T_AUDIO_PCM, 0, ts, buf, 0, n)) }
                 }
             } finally {
                 runCatching { rec.stop() }; rec.release()
@@ -416,8 +544,9 @@ class MirrorService : Service() {
                         stereo[i * 4] = mono[i * 2]; stereo[i * 4 + 1] = mono[i * 2 + 1]
                         stereo[i * 4 + 2] = mono[i * 2]; stereo[i * 4 + 3] = mono[i * 2 + 1]
                     }
+                    micPieces.incrementAndGet()
                     val ts = nowUs() - n / 2 * 1_000_000L / 48_000
-                    audioTarget()?.send(packet(T_AUDIO_MIC, 0, ts, stereo, 0, n * 2))
+                    audioTarget()?.let { c -> if (c.queued.get() < AUDIO_BACKLOG) c.send(packet(T_AUDIO_MIC, 0, ts, stereo, 0, n * 2)) }
                 }
             } finally {
                 rec?.let { runCatching { it.stop() }; it.release() }
@@ -440,7 +569,7 @@ class MirrorService : Service() {
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_note)
-            .setContentTitle("Den-Dev Live · Wi-Fi mirror")
+            .setContentTitle("Den-Dev Live · Mirror")
             .setContentText(text)
             .setOngoing(true)
             .setContentIntent(open)

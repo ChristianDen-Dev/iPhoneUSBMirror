@@ -24,6 +24,13 @@ Protocol of scrcpy-server v5.0.1 (see its doc/develop.md):
 
 The phone needs: Developer options -> USB debugging ON, and "Allow" tapped
 once on the phone for this computer.
+
+Den-Dev Live app on the phone (preferred, same as the iPhone):
+  When the app's mirror is on, it listens on phone ports 2345 / 2346 with the
+  exact iPhone wire format. Over USB we reach it with "adb forward" (like
+  usbmux for the iPhone). The app keeps capturing when the USB link blinks,
+  so the laptop just re-forwards and is back in under a second. scrcpy is
+  only the fallback (app not started) and a small helper for mouse control.
 """
 
 import os
@@ -135,6 +142,48 @@ def connect_wifi(host):
     return "connected" in out and "cannot" not in out and "failed" not in out
 
 
+def forward(serial, remote_port):
+    """adb forward tcp:<free> tcp:<remote_port> -> local port, or None."""
+    code, out = adb("forward", "tcp:0", f"tcp:{remote_port}", serial=serial, timeout=5)
+    last = out.strip().splitlines()[-1] if out.strip() else ""
+    return int(last) if code == 0 and last.isdigit() else None
+
+
+def remove_forward(serial, local_port):
+    if local_port:
+        adb("forward", "--remove", f"tcp:{local_port}", serial=serial, timeout=5)
+
+
+def connect_app(serial, main_port=2345, audio_port=2346):
+    """Den-Dev Live app mirror over adb. Returns (socket, main_local, audio_local)
+    or None when the app's mirror is not on. The app sends ORIENTATION + INFO
+    right away, so a real answer arrives within ~1 s (an adb forward to a closed
+    port accepts and then closes at once)."""
+    lp = forward(serial, main_port)
+    if not lp:
+        return None
+    s = None
+    try:
+        s = socket.create_connection(("127.0.0.1", lp), timeout=2)
+        s.settimeout(1.5)
+        if len(s.recv(1, socket.MSG_PEEK)) == 1:
+            s.settimeout(None)
+            ap = forward(serial, audio_port)
+            return s, lp, ap
+    except OSError:
+        pass
+    if s:
+        s.close()
+    remove_forward(serial, lp)
+    return None
+
+
+def restart_adb():
+    """Fresh adb server (after Windows re-plugs the phone, adb can lose it)."""
+    adb("kill-server", timeout=8)
+    adb("start-server", timeout=15)
+
+
 def recv_exact(sock, n):
     buf = bytearray(n)
     view = memoryview(buf)
@@ -188,8 +237,9 @@ class AndroidControl:
 class AndroidSession:
     """One mirroring session with one Android phone."""
 
-    def __init__(self, serial, keep_phone_sound=False):
+    def __init__(self, serial, keep_phone_sound=False, control_only=False):
         self.serial = serial
+        self.control_only = control_only     # mouse helper next to the app: tiny video, no sound
         self.wifi = is_wifi_serial(serial)
         self.keep_phone_sound = keep_phone_sound
         self.proc = None
@@ -216,15 +266,21 @@ class AndroidSession:
 
         # "keep sound on the phone" needs Android 13+ (playback capture + duplicate)
         dup = self.keep_phone_sound and self.sdk >= 33
-        args = [
-            f"scid={scid:08x}", "log_level=info",
-            "video_codec=h264", f"video_bit_rate={WIFI_BITRATE if self.wifi else USB_BITRATE}",
-            f"max_size={MAX_SIZE}", f"max_fps={MAX_FPS}",
-            "audio_codec=raw", f"audio_source={'playback' if dup else 'output'}",
-            "tunnel_forward=true", "control=true", "clipboard_autosync=false",
-        ]
-        if dup:
-            args.append("audio_dup=true")
+        if self.control_only:
+            # The picture is only used for touch positions: 5 fps, small, cheap.
+            args = [f"scid={scid:08x}", "log_level=warn", "video_codec=h264", "video_bit_rate=300000",
+                    "max_size=800", "max_fps=5", "audio=false",
+                    "tunnel_forward=true", "control=true", "clipboard_autosync=false"]
+        else:
+            args = [
+                f"scid={scid:08x}", "log_level=info",
+                "video_codec=h264", f"video_bit_rate={WIFI_BITRATE if self.wifi else USB_BITRATE}",
+                f"max_size={MAX_SIZE}", f"max_fps={MAX_FPS}",
+                "audio_codec=raw", f"audio_source={'playback' if dup else 'output'}",
+                "tunnel_forward=true", "control=true", "clipboard_autosync=false",
+            ]
+            if dup:
+                args.append("audio_dup=true")
         cmd = [ADB, "-s", self.serial, "shell", f"CLASSPATH={DEVICE_SERVER_PATH}", "app_process", "/",
                "com.genymobile.scrcpy.Server", SERVER_VERSION] + args
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=ENV,
@@ -233,7 +289,7 @@ class AndroidSession:
 
         try:
             self.video = self._connect_first()
-            self.audio = self._connect()
+            self.audio = None if self.control_only else self._connect()
             self.control_sock = self._connect()
             self.control_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             name = bytes(recv_exact(self.video, 64)).split(b"\0", 1)[0]
@@ -241,17 +297,33 @@ class AndroidSession:
             vcodec = struct.unpack(">I", recv_exact(self.video, 4))[0]
             if vcodec != CODEC_H264:
                 raise RuntimeError(f"unexpected video codec 0x{vcodec:08x}")
-            acodec = struct.unpack(">I", recv_exact(self.audio, 4))[0]
-            self.audio_ok = acodec == CODEC_RAW
-            if not self.audio_ok:
-                why = "needs Android 11 or newer" if acodec == 0 else f"error code {acodec}"
-                print(f"[android] no phone sound ({why})", flush=True)
+            if self.audio is not None:
+                acodec = struct.unpack(">I", recv_exact(self.audio, 4))[0]
+                self.audio_ok = acodec == CODEC_RAW
+                if not self.audio_ok:
+                    why = "needs Android 11 or newer" if acodec == 0 else f"error code {acodec}"
+                    print(f"[android] no phone sound ({why})", flush=True)
         finally:
             adb("forward", "--remove", f"tcp:{self.port}", serial=self.serial)
         for s in (self.video, self.audio):
-            s.settimeout(None)       # a closed USB / adb link ends recv() with an error
+            if s is not None:
+                s.settimeout(None)   # a closed USB / adb link ends recv() with an error
         self.control = AndroidControl(self.control_sock)
+        if self.control_only:
+            threading.Thread(target=self._drain_video, daemon=True, name="android-ctl-video").start()
         return self
+
+    def _drain_video(self):
+        """Mouse helper: read (and drop) the tiny picture, keep the touch size current."""
+        try:
+            for item in self.read_video():
+                if item[0] == "size":
+                    self.control.screen = item[1]
+        except Exception:
+            pass
+        self.alive = False
+
+    alive = True
 
     def _connect(self):
         s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
@@ -286,7 +358,7 @@ class AndroidSession:
             line = line.strip()
             if line:
                 self.log_tail = (self.log_tail + [line])[-10:]
-                print(f"[android] {line}", flush=True)
+                print(f"[android{'-mouse' if self.control_only else ''}] {line}", flush=True)
 
     # ---- streams -------------------------------------------------------------
     def read_video(self):

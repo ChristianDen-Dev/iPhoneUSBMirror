@@ -220,10 +220,10 @@ fun HomeScreen(open: (Screen) -> Unit) {
             }
         }
         if (Live.running) LiveBar(live) { open(Screen.LIVE) }
-        if (mirror.running) MirrorBar(mirror) { open(Screen.WIFI) }
-        ModeCard("USB", "Cable to the laptop. Lowest delay.", "🔌", "BEST", Theme.usb) { open(Screen.USB) }
-        ModeCard("Wi-Fi", "No cable. The laptop finds this phone.", "📶", "EASY", Theme.wifi) { open(Screen.WIFI) }
-        ModeCard("Go Live", "Stream from the phone to Facebook, YouTube, TikTok.", "🔴", "NO PC", Theme.live) { open(Screen.LIVE) }
+        if (mirror.running) MirrorBar(mirror) { open(if (mirror.usb) Screen.USB else Screen.WIFI) }
+        ModeCard("USB", "Mirror to your laptop with the cable", "🔌", "Lowest delay", Theme.usb) { open(Screen.USB) }
+        ModeCard("Wi-Fi", "Mirror to your laptop, no cable", "📶", "Wireless", Theme.wifi) { open(Screen.WIFI) }
+        ModeCard("Go Live", "Stream from this phone to Facebook, YouTube, TikTok...", "🔴", "No PC needed", Theme.live) { open(Screen.LIVE) }
         Hint("Tip: on the laptop, start Den-Dev Live (Desktop shortcut). The phone appears by itself.")
     }
 }
@@ -241,7 +241,7 @@ fun ModeCard(title: String, subtitle: String, symbol: String, badge: String, col
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(title, color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 22.sp)
                 Spacer(Modifier.width(8.dp))
-                Text(badge, color = colors[0], fontWeight = FontWeight.Bold, fontSize = 11.sp,
+                Text(badge, color = colors[0], fontWeight = FontWeight.Bold, fontSize = 11.sp, maxLines = 1, softWrap = false,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(colors[0].copy(alpha = 0.18f)).padding(horizontal = 7.dp, vertical = 3.dp))
             }
             Text(subtitle, color = Theme.dim, fontSize = 14.sp)
@@ -267,39 +267,17 @@ fun LiveBar(s: LiveStatus, onClick: () -> Unit) {
 @Composable
 fun MirrorBar(s: MirrorStatus, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Theme.wifi[0].copy(alpha = 0.22f)).clickable { onClick() }.padding(14.dp)) {
-        Text(if (s.connected) "Mirroring to the laptop" else "Wi-Fi mirror on · waiting for the laptop", color = Color.White, fontWeight = FontWeight.Bold)
+        Text(if (s.connected) "Mirroring to the laptop · ${if (s.usb) "USB" else "Wi-Fi"}" else "Mirror on · waiting for the laptop", color = Color.White, fontWeight = FontWeight.Bold)
     }
 }
 
-// ---------------- USB ----------------
+// ---------------- USB / Wi-Fi (same screen as the iPhone app) ----------------
 
 @Composable
-fun UsbScreen(back: () -> Unit) {
-    val context = LocalContext.current
-    val c = Theme.usb[0]
-    Page("USB", back) {
-        Text("Mirror with the cable", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 28.sp)
-        Text("Lowest delay, sharpest picture, steady sound. On Android the laptop does the work: nothing to start here.", color = Theme.dim)
-        Card {
-            Text("One time: turn on USB debugging", color = Color.White, fontWeight = FontWeight.Bold)
-            Step(1, "Settings → About phone → tap \"Build number\" 7 times.", c)
-            Step(2, "Settings → Developer options → USB debugging ON.", c)
-            BigButton("Open Developer options", null, Theme.usb) {
-                runCatching { context.startActivity(Intent(AndroidSettings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }
-                    .onFailure { context.startActivity(Intent(AndroidSettings.ACTION_DEVICE_INFO_SETTINGS)) }
-            }
-        }
-        Card {
-            Text("Every time", color = Color.White, fontWeight = FontWeight.Bold)
-            Step(1, "Start Den-Dev Live on the laptop.", c)
-            Step(2, "Plug in the phone → \"Allow USB debugging?\" → tick Always allow → Allow.", c)
-            Step(3, "Your screen + game sound appear on the laptop. The mouse works as your finger.", c)
-        }
-        Hint("Sound needs Android 11+. On the laptop: right-click → \"Android: switch to Wi-Fi\" to go wireless with adb.")
-    }
-}
+fun UsbScreen(back: () -> Unit) = MirrorScreen(usb = true, back = back)
 
-// ---------------- Wi-Fi ----------------
+@Composable
+fun WifiScreen(back: () -> Unit) = MirrorScreen(usb = false, back = back)
 
 fun wifiAddress(context: Context): String? {
     val cm = context.getSystemService(ConnectivityManager::class.java)
@@ -307,27 +285,42 @@ fun wifiAddress(context: Context): String? {
     return lp.linkAddresses.map { it.address }.firstOrNull { it is Inet4Address && !it.isLoopbackAddress }?.hostAddress
 }
 
+/** One mirror service for both: USB (the laptop connects through adb) and Wi-Fi. */
 @Composable
-fun WifiScreen(back: () -> Unit) {
+fun MirrorScreen(usb: Boolean, back: () -> Unit) {
     val context = LocalContext.current
     val status by Mirror.status.collectAsState()
     val mic by Mirror.micOn.collectAsState()
     var ip by remember { mutableStateOf(wifiAddress(context)) }
     LaunchedEffect(Unit) { while (true) { ip = wifiAddress(context); kotlinx.coroutines.delay(2000) } }
     val start = rememberCaptureStarter(MirrorService::class.java)
-    val c = Theme.wifi[0]
-    Page("Wi-Fi", back) {
-        Text("Mirror over Wi-Fi", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 28.sp)
-        Text("No cable. The laptop finds this phone by itself. A little more delay than USB.", color = Theme.dim)
-        Card {
+    val colors = if (usb) Theme.usb else Theme.wifi
+    val c = colors[0]
+    Page(if (usb) "USB" else "Wi-Fi", back) {
+        Text(if (usb) "Mirror with the cable" else "Mirror over Wi-Fi", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 28.sp)
+        Text(if (usb) "Lowest delay, sharpest picture, steady sound. Game sound + your mic, like the iPhone."
+             else "No cable. The laptop finds this phone by itself. A little more delay than USB.", color = Theme.dim)
+        if (!usb) Card {
             Text("This phone's Wi-Fi address", color = Theme.dim, fontSize = 13.sp)
             Text(ip ?: "Not on Wi-Fi", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 30.sp)
+        }
+        if (usb && !status.running) Card {
+            Text("One time: turn on USB debugging", color = Color.White, fontWeight = FontWeight.Bold)
+            Step(1, "Settings → About phone → tap \"Build number\" 7 times.", c)
+            Step(2, "Settings → Developer options → USB debugging ON.", c)
+            Step(3, "Plug in → \"Allow USB debugging?\" → tick Always allow → Allow.", c)
+            BigButton("Open Developer options", null, colors) {
+                runCatching { context.startActivity(Intent(AndroidSettings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }
+                    .onFailure { context.startActivity(Intent(AndroidSettings.ACTION_DEVICE_INFO_SETTINGS)) }
+            }
         }
         OverlayCard()
         if (status.running) {
             Card {
-                Text(if (status.connected) "✅ Mirroring to the laptop" else "⏳ Waiting for the laptop…", color = Color.White, fontWeight = FontWeight.Bold)
+                val link = if (status.usb) "USB" else "Wi-Fi"
+                Text(if (status.connected) "✅ Mirroring to the laptop · $link" else "⏳ Waiting for the laptop…", color = Color.White, fontWeight = FontWeight.Bold)
                 if (status.width > 0) Hint("${status.width} × ${status.height}")
+                if (!status.connected) Hint(if (usb) "Plug in the cable and open Den-Dev Live on the laptop." else "Open Den-Dev Live on the laptop (same Wi-Fi). It finds this phone by itself.")
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Your mic to the stream", color = Color.White, modifier = Modifier.weight(1f))
                     Switch(checked = mic, onCheckedChange = { Mirror.micOn.value = it })
@@ -339,14 +332,21 @@ fun WifiScreen(back: () -> Unit) {
         } else {
             Card {
                 Text("How to start", color = Color.White, fontWeight = FontWeight.Bold)
-                Step(1, "Phone and laptop on the same Wi-Fi (5 GHz is best), or the laptop on this phone's hotspot.", c)
-                Step(2, "Open Den-Dev Live on the laptop.", c)
-                Step(3, "Tap Start mirroring → Start now.", c)
-                Step(4, "Open your game. Stop from the notification or the floating bubble.", c)
+                if (usb) Step(1, "Plug the phone into the laptop (USB debugging ON).", c)
+                else Step(1, "Phone and laptop on the same Wi-Fi (5 GHz is best), or the laptop on this phone's hotspot.", c)
+                Step(2, "Open Den-Dev Live on the laptop (Start Mirror).", c)
+                Step(3, "Tap the button below → \"Entire screen\" → Start now.", c)
+                Step(4, "Open your game. Stop any time from the notification or the floating bubble.", c)
             }
-            BigButton("Start mirroring", "Over Wi-Fi", Theme.wifi) { start() }
+            BigButton("Start mirroring", if (usb) "Over the USB cable" else "Over Wi-Fi", colors) { start() }
         }
-        Hint("On the laptop: first toolbar button = Auto or Wi-Fi. W searches now.")
+        if (usb) {
+            Hint("If the cable drops: the mirror keeps running on the phone and the laptop reconnects by itself.")
+            Hint("Steadier cable: Developer options → Default USB configuration → File transfer.")
+        } else {
+            Hint("On the laptop: first toolbar button = Auto or Wi-Fi. W searches now.")
+            Hint("Plug in the cable while on Wi-Fi: the laptop moves to USB by itself.")
+        }
         Hint("Game sound needs Android 10+, and the game must allow sound recording.")
     }
 }

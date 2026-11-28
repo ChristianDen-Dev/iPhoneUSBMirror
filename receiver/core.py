@@ -529,7 +529,8 @@ class Receiver(threading.Thread):
         super().__init__(daemon=True, name="receiver")
         self.s = shared
         self.tcp_address = tcp_address
-        self.link = ("usb",)                    # ("usb",) or ("wifi", host, base_port)
+        self.link = ("usb",)                    # ("usb",) / ("wifi", host, base_port) /
+                                                # ("adb", serial, main_local, audio_local) = Android app
         self.view = FrameRenderer("bgra")       # for the window
         self.sync = SyncMeter()
         self.video = VideoWorker(self)
@@ -541,7 +542,10 @@ class Receiver(threading.Thread):
         self.android_ok = android.available()
         self.android_session = None
         self._android_retry_at = 0.0
-        self._handoff = None                    # USB socket found while streaming over Wi-Fi
+        self._handoff = None                    # (socket, link) found while on Wi-Fi / scrcpy
+        self._mouse = None                      # scrcpy mouse helper next to the Android app
+        self._adb_lost_at = 0.0                 # Android link dropped (for the adb self-repair)
+        self._adb_restart_at = 0.0
         self._android_switching = False         # Wi-Fi-only mode: turning a USB Android into Wi-Fi
         self._sock = None
         if not self.android_ok:
@@ -569,6 +573,20 @@ class Receiver(threading.Thread):
         if self.link[0] == "wifi":
             host, base = self.link[1], self.link[2]
             return socket.create_connection((host, base + (port - DEVICE_PORT)), timeout=2)
+        if self.link[0] == "adb":                       # Android app through adb forward
+            local = self.link[2] if port == DEVICE_PORT else self.link[3]
+            if not local:
+                raise OSError("no adb forward for this port")
+            s = socket.create_connection(("127.0.0.1", local), timeout=2)
+            s.settimeout(1.5)
+            try:
+                ok = s.recv(1, socket.MSG_PEEK)        # forward to a closed port: closes at once
+            except OSError:
+                ok = b""
+            if not ok:
+                s.close()
+                raise OSError("app port closed")
+            return s
         return self.usb_socket(port)
 
     def try_iphone_wifi(self):
@@ -593,10 +611,10 @@ class Receiver(threading.Thread):
 
     def run(self):
         while self.s.running:
-            sock, iphone_on_usb = self._handoff, False
-            self._handoff = None
-            if sock is not None:
-                self.link = ("usb",)
+            handoff, self._handoff = self._handoff, None
+            sock, iphone_on_usb = None, False
+            if handoff is not None:
+                sock, self.link = handoff
             elif not self.tcp_address and self.s.usb_allowed:
                 try:
                     sock = self.usb_socket()
@@ -624,46 +642,114 @@ class Receiver(threading.Thread):
             time.sleep(0.3)
 
     def run_iphone(self, sock):
+        """One session with a Den-Dev Live app: iPhone (USB / Wi-Fi) or the
+        Android app (adb over USB, or Wi-Fi). Same wire format for all."""
         s = self.s
-        wifi = self.link[0] == "wifi"
+        kind = self.link[0]
+        wifi = kind == "wifi" or (kind == "adb" and android.is_wifi_serial(self.link[1]))
         s.state = ST_CONNECTED
         s.found, s.hint = "", ""
-        s.device_kind, s.link_name, s.device_name = "iPhone", "Wi-Fi" if wifi else "USB", "iPhone"
+        if kind == "adb":
+            s.device_kind, s.device_name = "Android app", "Android"
+        else:
+            s.device_kind, s.device_name = "iPhone", "iPhone"   # an Android app on Wi-Fi says so in INFO
+        s.link_name = "Wi-Fi" if wifi else "USB"
         s.orientation = 1
         s.connected_since = time.monotonic()
         self._sock = sock
-        where = f"over Wi-Fi ({self.link[1]})" if wifi else "over USB"
-        print(f"[mirror] {time.strftime('%H:%M:%S')} connected to iPhone {where}", flush=True)
-        if wifi and not self.tcp_address:
+        where = {"wifi": f"over Wi-Fi ({self.link[1]})",
+                 "adb": f"over {s.link_name} (adb {self.link[1]})"}.get(kind, "over USB")
+        print(f"[mirror] {time.strftime('%H:%M:%S')} connected to the "
+              f"{'Android app' if kind == 'adb' else 'app'} {where}", flush=True)
+        if kind == "wifi" and not self.tcp_address:
             s.remember("wifi_hosts", self.link[1])
-        if wifi and not self.tcp_address and s.link_mode == "auto":
+        if kind == "wifi" and not self.tcp_address and s.link_mode == "auto":
             threading.Thread(target=self._watch_usb, args=(sock,), daemon=True, name="usb-watch").start()
+        if kind == "adb":
+            threading.Thread(target=self._mouse_loop, args=(sock, self.link[1]), daemon=True,
+                             name="android-mouse").start()
+        link = self.link
         try:
             self.stream(sock)
         except Exception as e:  # disconnect, timeout, protocol error
             print(f"[mirror] {time.strftime('%H:%M:%S')} stream ended: {type(e).__name__}: {e}", flush=True)
+            if kind == "adb" and self._handoff is None:
+                self._adb_lost_at = time.monotonic()
         finally:
             self._sock = None
             try:
                 sock.close()
             except OSError:
                 pass
+            if kind == "adb":
+                self._stop_mouse()
+                android.remove_forward(link[1], link[2])
+                android.remove_forward(link[1], link[3])
             self.cleanup()
 
+    # ---- Android app: mouse control (small scrcpy helper) ---------------------
+    def _mouse_loop(self, sock, serial):
+        """While the Android app mirrors over adb: keep a tiny scrcpy helper
+        running so the mouse works as a finger (the picture comes from the app)."""
+        time.sleep(1.0)
+        while self.s.running and self._sock is sock:
+            m = self._mouse
+            if m is None or not m.alive:
+                if m is not None:
+                    m.stop()
+                m = android.AndroidSession(serial, control_only=True)
+                try:
+                    m.start()
+                except Exception as e:
+                    m.stop()
+                    self._mouse = None
+                    print(f"[android] mouse control not available: {e}", flush=True)
+                    time.sleep(10)
+                    continue
+                if self._sock is not sock:
+                    m.stop()
+                    break
+                self._mouse = m
+                self.s.control = m.control
+                print(f"[android] {time.strftime('%H:%M:%S')} mouse control ready", flush=True)
+            time.sleep(3)
+
+    def _stop_mouse(self):
+        m, self._mouse = self._mouse, None
+        if m is not None:
+            m.stop()
+        self.s.control = None
+
+    def _usb_app_android(self):
+        """(socket, link) of the Android app over a USB adb link, or None."""
+        if not self.android_ok:
+            return None
+        for serial, st in android.list_devices():
+            if st == "device" and not android.is_wifi_serial(serial):
+                got = android.connect_app(serial)
+                if got:
+                    return got[0], ("adb", serial, got[1], got[2])
+        return None
+
     def _watch_usb(self, wifi_sock):
-        """While on Wi-Fi: as soon as the iPhone is plugged in, move to USB
-        (lower delay, no Wi-Fi stutters)."""
+        """While on Wi-Fi: as soon as the phone is plugged in, move to USB
+        (lower delay, no Wi-Fi stutters). iPhone: usbmux. Android app: adb."""
         while self.s.running and self._sock is wifi_sock and self.s.link_mode == "auto":
             time.sleep(2.0)
-            try:
-                usb = self.usb_socket()
-            except Exception:
+            if self.s.device_kind == "Android app":
+                found = self._usb_app_android()
+            else:
+                try:
+                    found = (self.usb_socket(), ("usb",))
+                except Exception:
+                    found = None
+            if found is None:
                 continue
             if self._sock is not wifi_sock:
-                usb.close()
+                found[0].close()
                 return
             self.s.notice("USB cable found - switching from Wi-Fi to USB", "good")
-            self._handoff = usb
+            self._handoff = found
             try:
                 wifi_sock.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -697,6 +783,15 @@ class Receiver(threading.Thread):
                 self._switch_android_to_wifi(on_usb[0])     # Wi-Fi only: do it for the user
                 return False
         if not ready:
+            now = time.monotonic()
+            # The phone's USB link blinked and adb lost it: give adb a fresh start (once).
+            if self._adb_lost_at and now - self._adb_lost_at > 4 and now - self._adb_restart_at > 30:
+                self._adb_lost_at, self._adb_restart_at = 0.0, now
+                print(f"[android] {time.strftime('%H:%M:%S')} phone gone after a drop - restarting adb", flush=True)
+                android.restart_adb()
+                return False
+            if any(st == "offline" for _, st in devs):
+                android.adb("reconnect", "offline", timeout=8)
             if any(st == "unauthorized" for _, st in devs):
                 self.s.found = "android_unauth"
             elif self.s.found.startswith("android"):
@@ -707,6 +802,15 @@ class Receiver(threading.Thread):
                 for host in list(self.s.android_hosts)[:2]:
                     threading.Thread(target=android.connect_wifi, args=(host,), daemon=True).start()
             return False
+        self._adb_lost_at = 0.0
+        # 1. The Den-Dev Live app (same as the iPhone: picture + game sound + mic).
+        for serial in sorted(ready, key=android.is_wifi_serial):  # USB first
+            got = android.connect_app(serial)
+            if got:
+                self.link = ("adb", serial, got[1], got[2])
+                self.run_iphone(got[0])
+                return True
+        # 2. Fallback: app mirror not started -> scrcpy (picture + game sound, no mic).
         serial = sorted(ready, key=android.is_wifi_serial)[0]     # USB first
         sess = android.AndroidSession(serial, self.s.android_keep_sound)
         try:
@@ -739,6 +843,7 @@ class Receiver(threading.Thread):
               f"({sess.serial}, API {sess.sdk}, sound {'on' if sess.audio_ok else 'off'})", flush=True)
         if sess.audio_ok:
             threading.Thread(target=self._android_audio, args=(sess,), daemon=True, name="android-audio").start()
+        threading.Thread(target=self._watch_app, args=(sess,), daemon=True, name="android-app-watch").start()
         config = b""
         try:
             for item in sess.read_video():
@@ -759,10 +864,30 @@ class Receiver(threading.Thread):
                 self.video.submit(config + data if is_key else data, is_key, pts)
         except Exception as e:
             print(f"[mirror] {time.strftime('%H:%M:%S')} Android stream ended: {type(e).__name__}: {e}", flush=True)
+            if self._handoff is None:
+                self._adb_lost_at = time.monotonic()
         finally:
             sess.stop()
             self.android_session = None
             self.cleanup()
+
+    def _watch_app(self, sess):
+        """scrcpy fallback running: as soon as the user taps Start mirroring in
+        the Den-Dev Live app, switch to the app (adds the mic, survives USB blinks)."""
+        while self.s.running and self.android_session is sess:
+            time.sleep(3.0)
+            if self.android_session is not sess:
+                return
+            got = android.connect_app(sess.serial)
+            if not got:
+                continue
+            if self.android_session is not sess:
+                got[0].close()
+                return
+            self.s.notice("Den-Dev Live app found - switching to the app", "good")
+            self._handoff = (got[0], ("adb", sess.serial, got[1], got[2]))
+            sess.stop()
+            return
 
     def _android_audio(self, sess):
         try:

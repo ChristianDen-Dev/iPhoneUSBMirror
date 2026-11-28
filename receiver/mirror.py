@@ -70,7 +70,7 @@ HELP_ROWS = [
     ("M", "Laptop sound on/off (the stream keeps its sound via VB-Cable)"),
     ("Up / Down, wheel", "Laptop volume"),
     ("A", "Sound panel: where game sound and mic come from"),
-    ("V", "Stream mic: Auto \u2192 Laptop \u2192 iPhone \u2192 Off (only one at a time)"),
+    ("V", "Stream mic: Auto \u2192 Laptop \u2192 Phone \u2192 Off (only one at a time)"),
     ("N", "Mute / unmute the stream mic"),
     ("T", "Always on top"),
     ("R", "Flip landscape 180°"),
@@ -78,7 +78,7 @@ HELP_ROWS = [
     ("F1", "Statistics"),
     ("O", "Open recordings folder"),
     ("L", "Connection: Auto \u2192 USB only \u2192 Wi-Fi only"),
-    ("W", "Find the iPhone on Wi-Fi now"),
+    ("W", "Find the phone on Wi-Fi now"),
     ("Click / drag", "Android: tap / swipe on the phone"),
     ("Backspace / Home / End", "Android: Back / Home / Recent apps"),
     ("Right-click", "All options"),
@@ -90,7 +90,7 @@ LINK_LABEL = {"auto": "Auto (USB first, then Wi-Fi)", "usb": "USB cable only", "
 LINK_ICON = {"auto": "linkauto", "usb": "usb", "wifi": "wifi"}
 
 MIC_SOURCES = ("auto", "laptop", "phone", "off")
-MIC_LABEL = {"auto": "Auto mic", "laptop": "Laptop mic", "phone": "iPhone mic", "off": "No mic (TikTok/OBS mic)"}
+MIC_LABEL = {"auto": "Auto mic", "laptop": "Laptop mic", "phone": "Phone mic", "off": "No mic (TikTok/OBS mic)"}
 
 
 def load_settings():
@@ -342,7 +342,7 @@ class App:
                 self.toast("Sound off - this also mutes the stream (VB-Cable output is off)", AMBER)
         elif key == "micmute":
             if self.router.mic_source == "off":
-                self.toast("No mic selected - press V to choose Laptop or iPhone mic", AMBER)
+                self.toast("No mic selected - press V to choose Laptop or Phone mic", AMBER)
             else:
                 self.router.mic_muted = not self.router.mic_muted
                 if self.router.mic_muted:
@@ -364,9 +364,9 @@ class App:
                 self.save()
                 msg = "Stream mic: " + MIC_LABEL[src]
                 if src == "auto":
-                    msg += "  (iPhone mic; laptop mic when the iPhone mic is silent)"
+                    msg += "  (phone mic; laptop mic when the phone mic is silent)"
                 elif src == "phone" and not self.router.mic_active:
-                    msg += "  -  turn ON Microphone in the iPhone Start Broadcast sheet"
+                    msg += "  -  " + self.phone_mic_help()
                 elif src == "laptop" and not self.router.mic_ready:
                     msg += f"  -  cannot open it ({self.router.laptop_mic.error})"
                 self.toast(msg, GREEN if self.router.mic_ready or src == "off" else AMBER, force=True)
@@ -415,13 +415,13 @@ class App:
             self.save()
             tip = {"auto": "uses the cable when plugged in, otherwise Wi-Fi",
                    "usb": "lowest delay - Wi-Fi is not used",
-                   "wifi": "no cable - same Wi-Fi or the iPhone Hotspot"}[mode]
+                   "wifi": "no cable - same Wi-Fi or the phone's hotspot"}[mode]
             self.toast(f"Connection: {LINK_LABEL[mode]}  -  {tip}", ACCENT, force=True)
         elif key == "wifi_scan":
             if s.link_mode == "usb":
                 self.do("link_auto")
             self.receiver.wifi.scan_now.set()
-            self.toast("Looking for the iPhone on Wi-Fi...  (start the broadcast on the iPhone)", ACCENT)
+            self.toast("Looking for the phone on Wi-Fi...  (start mirroring in the Den-Dev Live app)", ACCENT)
         elif key == "android_wifi":
             self.receiver.android_to_wifi()
         elif key == "android_sound":
@@ -463,9 +463,9 @@ class App:
             ("cable", "Send game sound to stream (VB-Cable)", self.router.cable_ok, bool(self.router.cable_name)),
             ("mute", "Laptop sound off\tM", self.audio.muted, True),
             None,
-            ("mic_auto", "Stream mic: Auto (iPhone, else laptop)\tV", self.router.mic_source == "auto", self.router.cable_ok),
+            ("mic_auto", "Stream mic: Auto (phone, else laptop)\tV", self.router.mic_source == "auto", self.router.cable_ok),
             ("mic_laptop", "Stream mic: Laptop / headset mic", self.router.mic_source == "laptop", self.router.cable_ok),
-            ("mic_phone", "Stream mic: iPhone mic", self.router.mic_source == "phone", self.router.cable_ok),
+            ("mic_phone", "Stream mic: Phone mic", self.router.mic_source == "phone", self.router.cable_ok),
             ("mic_off", "Stream mic: none (use TikTok / OBS mic)", self.router.mic_source == "off", self.router.cable_ok),
             ("micmute", "Mute stream mic\tN", self.router.mic_muted, self.router.mic_source != "off"),
             ("mic+", f"Mic louder  ({self.cfg['mic_gain']} %)", False, self.cfg["mic_gain"] < 300),
@@ -473,7 +473,7 @@ class App:
             ("vol+", f"Laptop volume up  ({self.cfg['volume']} %)\tUp", False, self.cfg["volume"] < 150),
             ("vol-", "Laptop volume down\tDown", False, self.cfg["volume"] > 0),
             None,
-            ("wifi_scan", "Find iPhone on Wi-Fi now\tW", False, True),
+            ("wifi_scan", "Find phone on Wi-Fi now\tW", False, True),
             ("link_auto", "Connection: Auto (USB first, then Wi-Fi)\tL", self.s.link_mode == "auto", True),
             ("link_usb", "Connection: USB cable only", self.s.link_mode == "usb", True),
             ("link_wifi", "Connection: Wi-Fi only", self.s.link_mode == "wifi", True),
@@ -517,6 +517,15 @@ class App:
         pygame.K_o: "folder", pygame.K_h: "help", pygame.K_a: "sound", pygame.K_n: "micmute", pygame.K_v: "micsrc",
         pygame.K_w: "wifi_scan", pygame.K_l: "link", pygame.K_BACKSPACE: "aback", pygame.K_HOME: "ahome", pygame.K_END: "aapps",
     }
+
+    def phone_mic_help(self):
+        """How to switch the phone mic on, for the phone that is connected."""
+        kind = self.s.device_kind
+        if kind == "Android app":
+            return "turn ON 'Your mic to the stream' in the Den-Dev Live app (or the bubble / notification)"
+        if kind == "Android":
+            return "tap Start mirroring in the Den-Dev Live app on the phone (adds your mic)"
+        return "stop the broadcast, tap Microphone ON in the Start Broadcast sheet, start again"
 
     def touch(self, action, pos):
         """Window position -> finger on the Android phone."""
@@ -839,7 +848,7 @@ class App:
                 y += p.px(22)
             y += p.px(6)
 
-        scr.blit(p.text(p.f_ui_b, "Game sound (iPhone)", DIM), (x0, y))
+        scr.blit(p.text(p.f_ui_b, "Game sound (phone)", DIM), (x0, y))
         bar = pygame.Rect(col2, y + p.px(6), box.right - col2 - p.px(28), p.px(10))
         pygame.draw.rect(scr, PANEL_2, bar, border_radius=p.px(5))
         fill = bar.copy()
@@ -861,7 +870,7 @@ class App:
             (self.audio.device_name or "-") + "   \u00b7   M = on/off")
         if rt.mic_source != "off" and rt.cable_ok and rt.mic_ready:
             state = "MUTED (N to unmute)" if rt.mic_muted else f"ON - in the stream  ({self.cfg['mic_gain']} %)"
-            src = rt.laptop_mic.device_name if rt.effective_mic == "laptop" else "iPhone mic"
+            src = rt.laptop_mic.device_name if rt.effective_mic == "laptop" else "Phone mic"
             if rt.mic_source == "auto":
                 src = "Auto: " + src
             scr.blit(p.text(p.f_ui_b, "Microphone (V)", DIM), (x0, y))
@@ -879,14 +888,14 @@ class App:
                      (col2, y))
             y += p.px(28)
         elif rt.mic_source == "phone":
-            row("Microphone (V)", "iPhone mic selected, but the iPhone sends no mic", AMBER,
-                "Stop the broadcast, tap Microphone ON in the Start Broadcast sheet, start again")
+            row("Microphone (V)", "Phone mic selected, but the phone sends no mic", AMBER,
+                self.phone_mic_help())
         elif rt.mic_source == "laptop":
             row("Microphone (V)", "Laptop mic selected, but it cannot be opened", AMBER,
                 rt.laptop_mic.error or "Check Windows Settings > Privacy > Microphone")
         else:
             row("Microphone (V)", "none from this app - TikTok LIVE Studio / OBS mic is used", TEXT,
-                "Press V to send the Laptop or iPhone mic from this app instead")
+                "Press V to send the Laptop or Phone mic from this app instead")
         t = p.text(p.f_small, "Esc or A to close", FAINT)
         scr.blit(t, (box.right - t.get_width() - p.px(20), box.bottom - p.px(26)))
 
@@ -913,8 +922,8 @@ class App:
             right.append((f"● REC {fmt_time(self.rec.elapsed)}  {self.rec.size_mb:.0f} MB", RED))
         if self.live:
             heat = s.thermal
-            if heat and s.device_kind == "iPhone":
-                right.append((f"iPhone heat: {heat.capitalize()}", HEAT_COLORS.get(heat, DIM)))
+            if heat and s.device_kind in ("iPhone", "Android app"):
+                right.append((f"Phone heat: {heat.capitalize()}", HEAT_COLORS.get(heat, DIM)))
             right.append((f"Audio {self.audio.buffered_ms:.0f} ms", DIM))
         rt = self.router
         if rt.mic_source == "off":
@@ -943,9 +952,8 @@ class App:
         scr.fill(BG, area)
         found = self.s.found
         steps = [
-            ("iPhone: USB cable or same Wi-Fi  \u00b7  Android: USB cable + USB debugging ON", st != ST_NO_USB),
-            ("iPhone: Den-Dev Live app \u2192 round button \u2192 Start Broadcast  \u00b7  Android: tap Allow",
-             st == ST_CONNECTED),
+            ("USB cable or same Wi-Fi  (Android: USB debugging ON)", st != ST_NO_USB),
+            ("Den-Dev Live app \u2192 USB or Wi-Fi \u2192 Start mirroring", st == ST_CONNECTED),
             ("Open your game - the picture appears here", False),
         ]
         title = {"iphone": "Start the broadcast", "iphone_wifi": "iPhone is on Wi-Fi - start the broadcast",
@@ -1006,7 +1014,7 @@ class App:
             f"sync: {s.sync_text or '-'}",
             f"audio buffer {a.buffered_ms:3.0f}/{a.target_ms} ms  underruns {a.underruns}  skips {a.skips}  "
             f"speed fixes {a.corrections}",
-            f"iPhone: {s.info or '-'}",
+            f"phone: {s.info or '-'}",
         ]
         if self.rec.active:
             lines.append(f"recording [{self.rec.encoder_name}] {self.rec.frames} frames, dropped {self.rec.dropped}")

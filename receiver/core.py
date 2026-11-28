@@ -611,35 +611,50 @@ class Receiver(threading.Thread):
 
     def run(self):
         while self.s.running:
-            handoff, self._handoff = self._handoff, None
-            sock, iphone_on_usb = None, False
-            if handoff is not None:
-                sock, self.link = handoff
-            elif not self.tcp_address and self.s.usb_allowed:
+            try:
+                self.connect_once()
+            except Exception:
+                import traceback
+                print(f"[mirror] {time.strftime('%H:%M:%S')} connection loop error (recovering):", flush=True)
+                traceback.print_exc()
                 try:
-                    sock = self.usb_socket()
-                    self.link = ("usb",)
-                except NoDeviceError:
-                    pass
+                    self._sock = None
+                    self.cleanup()
                 except Exception:
-                    iphone_on_usb = True        # iPhone plugged in, broadcast not started
-            if sock is None and self.android_ok and not self.tcp_address:
-                if self.try_android():
-                    continue
-            if sock is None:
-                sock = self.try_iphone_wifi()
-            if sock is None:
-                if iphone_on_usb:
-                    self.s.found = "iphone"
-                elif self.s.wifi_allowed and self.wifi.iphones and self.s.found in ("", "iphone", "iphone_wifi"):
-                    self.s.found, self.s.hint = "iphone_wifi", ", ".join(self.wifi.iphones[:2])
-                elif self.s.found in ("iphone", "iphone_wifi"):
-                    self.s.found = ""
-                self.s.state = ST_NO_APP if self.s.found else ST_NO_USB
+                    pass
                 time.sleep(1.0)
-                continue
-            self.run_iphone(sock)
-            time.sleep(0.3)
+
+    def connect_once(self):
+        """One round: find a phone and mirror it until it disconnects."""
+        handoff, self._handoff = self._handoff, None
+        sock, iphone_on_usb = None, False
+        if handoff is not None:
+            sock, self.link = handoff
+        elif not self.tcp_address and self.s.usb_allowed:
+            try:
+                sock = self.usb_socket()
+                self.link = ("usb",)
+            except NoDeviceError:
+                pass
+            except Exception:
+                iphone_on_usb = True        # iPhone plugged in, broadcast not started
+        if sock is None and self.android_ok and not self.tcp_address:
+            if self.try_android():
+                return
+        if sock is None:
+            sock = self.try_iphone_wifi()
+        if sock is None:
+            if iphone_on_usb:
+                self.s.found = "iphone"
+            elif self.s.wifi_allowed and self.wifi.iphones and self.s.found in ("", "iphone", "iphone_wifi"):
+                self.s.found, self.s.hint = "iphone_wifi", ", ".join(self.wifi.iphones[:2])
+            elif self.s.found in ("iphone", "iphone_wifi"):
+                self.s.found = ""
+            self.s.state = ST_NO_APP if self.s.found else ST_NO_USB
+            time.sleep(1.0)
+            return
+        self.run_iphone(sock)
+        time.sleep(0.3)
 
     def run_iphone(self, sock):
         """One session with a Den-Dev Live app: iPhone (USB / Wi-Fi) or the
@@ -657,8 +672,12 @@ class Receiver(threading.Thread):
         s.orientation = 1
         s.connected_since = time.monotonic()
         self._sock = sock
-        where = {"wifi": f"over Wi-Fi ({self.link[1]})",
-                 "adb": f"over {s.link_name} (adb {self.link[1]})"}.get(kind, "over USB")
+        if kind == "wifi":
+            where = f"over Wi-Fi ({self.link[1]})"
+        elif kind == "adb":
+            where = f"over {s.link_name} (adb {self.link[1]})"
+        else:
+            where = "over USB"
         print(f"[mirror] {time.strftime('%H:%M:%S')} connected to the "
               f"{'Android app' if kind == 'adb' else 'app'} {where}", flush=True)
         if kind == "wifi" and not self.tcp_address:
